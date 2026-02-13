@@ -49,9 +49,20 @@ while True:
         # Draw palm point
         cv2.circle(frame, (x_px, y_px), 10, (0, 0, 255), -1)
 
+        # ---------- FIST → ZOOM OUT ----------
+        if is_fist(hand) and current_time - last_action_time > delay:
+            pyautogui.hotkey('ctrl', '-')
+            print("ZOOM OUT")
+            last_action_time = current_time
+
+        # ---------- PALM UP → ZOOM IN ----------
+        elif y_px < h // 3 and current_time - last_action_time > delay:
+            pyautogui.hotkey('ctrl', '+')
+            print("ZOOM IN")
+            last_action_time = current_time
 
         # ---------- LEFT / RIGHT SLIDE ----------
-        if x_px < w // 3 and current_time - last_action_time > delay:
+        elif x_px < w // 3 and current_time - last_action_time > delay:
             pyautogui.press('left')
             print("PREVIOUS SLIDE")
             last_action_time = current_time
