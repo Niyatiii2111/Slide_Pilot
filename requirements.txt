@@ -2,7 +2,8 @@ streamlit
 streamlit-webrtc
 streamlit-autorefresh
 
-opencv-python
+opencv-python-headless
+mediapipe
 av
 cvzone
 
