@@ -2,8 +2,8 @@ streamlit
 streamlit-webrtc
 streamlit-autorefresh
 
-opencv-python-headless
-mediapipe
+opencv-python-headless==4.9.0.80
+mediapipe==0.10.14
 av
 cvzone
 
@@ -21,3 +21,4 @@ faiss-cpu
 sentence-transformers
 huggingface-hub
 groq
+
