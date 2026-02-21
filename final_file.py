@@ -104,7 +104,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ───────────────── CENTERED TITLE ─────────────────
-st.markdown('<div class="main-title">📚 PDF Presentation Assistant</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">PDF Presentation Assistant</div>', unsafe_allow_html=True)
 st.markdown('<div class="main-subtitle">Upload your PDF · Navigate with gestures · Chat with AI</div>', unsafe_allow_html=True)
 
 # ───────────────── ENV API KEY ─────────────────
@@ -457,4 +457,5 @@ Answer:"""
                                 "content": err_msg
                             })
     else:
+
         st.info("⬅️ Process a PDF first to enable the assistant.")
