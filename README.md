@@ -29,7 +29,7 @@ The system demonstrates practical integration of:
 ## Home Page
 Streamlit-based interface displaying PDF slide viewer, gesture control panel, and Groq-powered document assistant.
 <p align="left">
-  <img src="https://raw.githubusercontent.com/Niyatiii2111/SP0510---Major-Project/7f7740a96539d775317be7165a83cc0b54c7ca36/Slidepilot%20homepage.jpeg
+  <img src="https://raw.githubusercontent.com/Niyatiii2111/SP0510---Major-Project/7f7740a96539d775317be7165a83cc0b54c7ca36/Slidepilot%20homepage.jpeg"
 Project/5bc771d89149149ac559ba111079aa279043476c/Home%20page.jpeg" width="500"/>
   <br>
 
