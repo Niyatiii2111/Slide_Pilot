@@ -74,7 +74,7 @@ Project/5bc771d89149149ac559ba111079aa279043476c/Home%20page.jpeg" width="500"/>
 <p align="left">
   <img src="https://github.com/Niyatiii2111/SP0510---Major-Project/blob/8c1e9b3e60fa7957d3939abb810d6981e883cad3/Hands%20image.jpeg?raw=true" width="200"/>
   <br>
-  <em>Gesture Mapping for Slide Navigation</em>
+  <em>Gesture Mapping for Slide Navigation/Zoom Control</em>
 </p>
 
 | Mode | Gesture | Action |
@@ -110,11 +110,6 @@ PDF Upload → Text Extraction → Chunking → Embeddings → FAISS → Similar
 - Internet connection (for Groq API)
 
 ---
-
-
-# GROQ API SETUP (update)
-
-Your code now uses environment variable.
 
 ## Groq API Key Setup
 
