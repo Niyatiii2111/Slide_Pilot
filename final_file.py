@@ -18,31 +18,11 @@ from streamlit_webrtc import VideoProcessorBase, webrtc_streamer
 from streamlit_autorefresh import st_autorefresh
 
 # ───────────────── PAGE CONFIG ─────────────────
-st.set_page_config(page_title="PDF Presentation Assistant", layout="wide")
+st.set_page_config(page_title="SlidePilot", layout="wide")
 
 # ───────────────── CUSTOM CSS ─────────────────
 st.markdown("""
 <style>
-    .main-title {
-        text-align: center;
-        font-family: 'Georgia', serif;
-        font-size: 2.6rem;
-        font-weight: 700;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        margin-bottom: 0.2rem;
-        letter-spacing: 1px;
-    }
-    .main-subtitle {
-        text-align: center;
-        color: #888;
-        font-size: 0.95rem;
-        margin-bottom: 1.5rem;
-        font-family: 'Georgia', serif;
-        font-style: italic;
-    }
     .mode-badge {
         display: inline-block;
         font-size: 0.82rem;
@@ -101,9 +81,35 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">PDF Presentation Assistant</div>', unsafe_allow_html=True)
-st.markdown('<div class="main-subtitle">Upload your PDF · Navigate with gestures · Zoom · Chat with AI</div>', unsafe_allow_html=True)
-
+# ───────────────── HEADING (matches reference image) ─────────────────
+st.markdown("""
+<div style="
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 18px 0 10px 0;
+">
+    <div style="
+        font-family: 'Georgia', serif;
+        font-size: 2.1rem;
+        font-weight: 800;
+        letter-spacing: -0.5px;
+        line-height: 1;
+    ">
+        <span style="color: #ffffff;">Slide</span><span style="color: #5b7fe8;">Pilot</span>
+    </div>
+    <div style="
+        color: #6b7280;
+        font-size: 0.75rem;
+        font-weight: 600;
+        letter-spacing: 2.5px;
+        text-transform: uppercase;
+        padding-top: 4px;
+    ">
+        Gesture &nbsp;&middot;&nbsp; Zoom &nbsp;&middot;&nbsp; AI Chat
+    </div>
+</div>
+""", unsafe_allow_html=True)
 # ───────────────── ENV API KEY ─────────────────
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
@@ -196,18 +202,20 @@ def build_vector_store(text):
 #  │ 4+        │ ➡️ Next slide    │ 🔎 Zoom Out        │
 #  └───────────┴──────────────────┴───────────────────┘
 
-_FIST_HOLD_SECONDS = 2.0
-_NAV_COOLDOWN      = 2.0
-_ZOOM_COOLDOWN     = 1.2
+_FIST_HOLD_SECONDS  = 2.0
+_NAV_COOLDOWN       = 2.0
+_ZOOM_COOLDOWN      = 1.2
+_MODE_SWITCH_BREAK  = 2.5   # seconds to ignore all actions after a mode toggle
 
 
 class GestureProcessor(VideoProcessorBase):
 
     def __init__(self):
-        self.detector   = HandDetector(maxHands=1, detectionCon=0.5)
-        self.mode       = "NAV"
-        self.last_time  = 0.0
-        self.fist_start = None
+        self.detector         = HandDetector(maxHands=1, detectionCon=0.5)
+        self.mode             = "NAV"
+        self.last_time        = 0.0
+        self.fist_start       = None
+        self.mode_switch_time = 0.0   # timestamp of last mode toggle
 
     @staticmethod
     def _put(img, text, pos, scale=0.60, color=(200, 200, 200), thickness=2):
@@ -254,6 +262,7 @@ class GestureProcessor(VideoProcessorBase):
                     new_mode = "ZOOM" if self.mode == "NAV" else "NAV"
                     self.mode              = new_mode
                     shared["gesture_mode"] = new_mode
+                    self.mode_switch_time  = now   # start the break window
                     try:
                         get_gesture_queue().put_nowait(f"MODE_{new_mode}")
                     except queue.Full:
@@ -275,7 +284,8 @@ class GestureProcessor(VideoProcessorBase):
 
                 if action:
                     cooldown = _ZOOM_COOLDOWN if action.startswith("ZOOM") else _NAV_COOLDOWN
-                    if now - self.last_time > cooldown:
+                    in_break = (now - self.mode_switch_time) < _MODE_SWITCH_BREAK
+                    if not in_break and now - self.last_time > cooldown:
                         try:
                             get_gesture_queue().put_nowait(action)
                         except queue.Full:
@@ -289,8 +299,16 @@ class GestureProcessor(VideoProcessorBase):
                     "ZOOM_OUT": "- ZOOM OUT",
                 }
                 label = label_map.get(action or "", "dead zone")
-                self._put(small, f"{total} finger{'s' if total!=1 else ''}   {label}",
-                          (10, 30), color=mode_color)
+
+                # Show break countdown if we're still in the post-switch window
+                remaining = _MODE_SWITCH_BREAK - (now - self.mode_switch_time)
+                if remaining > 0:
+                    self._put(small, f"Mode switched — ready in {remaining:.1f}s",
+                              (10, 30), color=(255, 200, 50))
+                    self._hbar(small, remaining / _MODE_SWITCH_BREAK, color=(255, 200, 50))
+                else:
+                    self._put(small, f"{total} finger{'s' if total!=1 else ''}   {label}",
+                              (10, 30), color=mode_color)
 
         else:
             shared["finger_count"]  = None
@@ -333,6 +351,14 @@ with st.sidebar:
 
     # ── Current mode indicator ─────────────────────────────────────
     st.markdown("### 🎥 Gesture Control")
+
+    # Sync from the processor's shared state BEFORE rendering the guide.
+    # The queue is only drained later in the sidebar, so without this sync
+    # the guide would always show the previous mode for one full cycle.
+    _shared_now = get_shared_state()
+    if _shared_now["gesture_mode"] != st.session_state.gesture_mode:
+        st.session_state.gesture_mode = _shared_now["gesture_mode"]
+
     is_zoom = st.session_state.gesture_mode == "ZOOM"
     mode_cls  = "mode-zoom" if is_zoom else "mode-nav"
     mode_icon = "🔍 ZOOM MODE" if is_zoom else "🧭 NAV MODE"
@@ -481,12 +507,12 @@ with left_col:
         overflow_css = "hidden" if zoom > 1.0 else "visible"
 
         st.markdown(
-            f'''<div style="overflow:{overflow_css}; max-height:600px;
-                            display:flex; justify-content:center;
+            f'''<div style="overflow:{overflow_css}; min-height:300px; max-height:680px;
+                            display:flex; justify-content:center; align-items:center;
                             border-radius:8px;">
                   <img src="data:image/png;base64,{img_b64}"
                        style="transform: scale({zoom});
-                              transform-origin: center top;
+                              transform-origin: center center;
                               transition: transform 0.35s cubic-bezier(0.25,0.46,0.45,0.94);
                               width:100%; height:auto;" />
                 </div>''',
