@@ -81,17 +81,20 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ───────────────── HEADING (matches reference image) ─────────────────
+# ───────────────── HEADING (centered) ─────────────────
 st.markdown("""
 <div style="
     display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 18px;
+    justify-content: center;
+    gap: 6px;
     padding: 18px 0 10px 0;
+    text-align: center;
 ">
     <div style="
         font-family: 'Georgia', serif;
-        font-size: 2.1rem;
+        font-size: 3.2rem;
         font-weight: 800;
         letter-spacing: -0.5px;
         line-height: 1;
@@ -104,7 +107,6 @@ st.markdown("""
         font-weight: 600;
         letter-spacing: 2.5px;
         text-transform: uppercase;
-        padding-top: 4px;
     ">
         Gesture &nbsp;&middot;&nbsp; Zoom &nbsp;&middot;&nbsp; AI Chat
     </div>
@@ -185,27 +187,10 @@ def build_vector_store(text):
     return FAISS.from_texts(chunks, embeddings)
 
 # ───────────────── GESTURE PROCESSOR ─────────────────
-#
-#  MODE SYSTEM  (solves the thumb-misdetection problem)
-#  ────────────────────────────────────────────────────
-#  Only finger counts 0, 1, and 4+ are ever used.
-#  2 and 3 are a deliberate dead zone, so thumb false-positives
-#  (e.g. 1 finger briefly read as 2) have zero effect.
-#
-#  ┌───────────┬──────────────────┬───────────────────┐
-#  │ Fingers   │ NAV mode         │ ZOOM mode          │
-#  ├───────────┼──────────────────┼───────────────────┤
-#  │ 0 – fist  │ hold 2s → enter ZOOM                  │
-#  │           │ hold 2s → exit  ZOOM                   │
-#  │ 1         │ ⬅️ Prev slide    │ 🔍 Zoom In         │
-#  │ 2 – 3     │ (dead zone – no action)                │
-#  │ 4+        │ ➡️ Next slide    │ 🔎 Zoom Out        │
-#  └───────────┴──────────────────┴───────────────────┘
-
 _FIST_HOLD_SECONDS  = 2.0
 _NAV_COOLDOWN       = 2.0
 _ZOOM_COOLDOWN      = 1.2
-_MODE_SWITCH_BREAK  = 2.5   # seconds to ignore all actions after a mode toggle
+_MODE_SWITCH_BREAK  = 2.5
 
 
 class GestureProcessor(VideoProcessorBase):
@@ -215,7 +200,7 @@ class GestureProcessor(VideoProcessorBase):
         self.mode             = "NAV"
         self.last_time        = 0.0
         self.fist_start       = None
-        self.mode_switch_time = 0.0   # timestamp of last mode toggle
+        self.mode_switch_time = 0.0
 
     @staticmethod
     def _put(img, text, pos, scale=0.60, color=(200, 200, 200), thickness=2):
@@ -235,7 +220,6 @@ class GestureProcessor(VideoProcessorBase):
         hands, small = self.detector.findHands(small, draw=True)
         shared       = get_shared_state()
 
-        # Sync mode from UI thread (button press may have changed it)
         self.mode    = shared["gesture_mode"]
         is_zoom_mode = self.mode == "ZOOM"
         mode_color   = (50, 200, 100) if is_zoom_mode else (102, 126, 234)
@@ -246,7 +230,6 @@ class GestureProcessor(VideoProcessorBase):
             total   = sum(fingers)
             shared["finger_count"] = total
 
-            # ── FIST: mode-toggle hold ──────────────────────────────
             if total == 0:
                 if self.fist_start is None:
                     self.fist_start = now
@@ -262,15 +245,14 @@ class GestureProcessor(VideoProcessorBase):
                     new_mode = "ZOOM" if self.mode == "NAV" else "NAV"
                     self.mode              = new_mode
                     shared["gesture_mode"] = new_mode
-                    self.mode_switch_time  = now   # start the break window
+                    self.mode_switch_time  = now
                     try:
                         get_gesture_queue().put_nowait(f"MODE_{new_mode}")
                     except queue.Full:
                         pass
-                    self.fist_start = None   # reset to avoid repeated toggles
+                    self.fist_start = None
                     self.last_time  = now
 
-            # ── OPEN HAND: nav / zoom actions ──────────────────────
             else:
                 self.fist_start         = None
                 shared["fist_hold_pct"] = 0.0
@@ -280,7 +262,6 @@ class GestureProcessor(VideoProcessorBase):
                     action = "ZOOM_IN"  if is_zoom_mode else "LEFT"
                 elif total >= 4:
                     action = "ZOOM_OUT" if is_zoom_mode else "RIGHT"
-                # 2 or 3 fingers → dead zone, action stays None
 
                 if action:
                     cooldown = _ZOOM_COOLDOWN if action.startswith("ZOOM") else _NAV_COOLDOWN
@@ -300,7 +281,6 @@ class GestureProcessor(VideoProcessorBase):
                 }
                 label = label_map.get(action or "", "dead zone")
 
-                # Show break countdown if we're still in the post-switch window
                 remaining = _MODE_SWITCH_BREAK - (now - self.mode_switch_time)
                 if remaining > 0:
                     self._put(small, f"Mode switched — ready in {remaining:.1f}s",
@@ -316,7 +296,6 @@ class GestureProcessor(VideoProcessorBase):
             self.fist_start         = None
             self._put(small, "No hand detected", (10, 30), color=(160, 160, 160))
 
-        # ── Mode banner at bottom ───────────────────────────────────
         mode_text = "ZOOM MODE" if is_zoom_mode else "NAV MODE"
         cv2.rectangle(small, (0, 210), (320, 240), (20, 20, 20), -1)
         self._put(small, f"[ {mode_text} ]  ✊ fist 2s = switch",
@@ -349,12 +328,8 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Current mode indicator ─────────────────────────────────────
     st.markdown("### 🎥 Gesture Control")
 
-    # Sync from the processor's shared state BEFORE rendering the guide.
-    # The queue is only drained later in the sidebar, so without this sync
-    # the guide would always show the previous mode for one full cycle.
     _shared_now = get_shared_state()
     if _shared_now["gesture_mode"] != st.session_state.gesture_mode:
         st.session_state.gesture_mode = _shared_now["gesture_mode"]
@@ -367,7 +342,6 @@ with st.sidebar:
         unsafe_allow_html=True
     )
 
-    # Reference table (changes with mode)
     if not is_zoom:
         st.markdown("""
 | Gesture | Action |
@@ -387,7 +361,6 @@ with st.sidebar:
 | 🖐️ 4+ fingers | 🔎 Zoom Out |
 """)
 
-    # Manual mode toggle (keyboard/mouse fallback)
     toggle_label = "🔁 Switch to Zoom mode" if not is_zoom else "🔁 Switch to Nav mode"
     if st.button(toggle_label, use_container_width=True):
         new = "ZOOM" if not is_zoom else "NAV"
@@ -397,7 +370,6 @@ with st.sidebar:
 
     st.divider()
 
-    # ── WebRTC streamer ────────────────────────────────────────────
     ctx = webrtc_streamer(
         key="gesture",
         video_processor_factory=GestureProcessor,
@@ -405,7 +377,6 @@ with st.sidebar:
         media_stream_constraints={"video": {"width": 320, "height": 240}, "audio": False},
     )
 
-    # ── Live feedback ──────────────────────────────────────────────
     shared = get_shared_state()
     if ctx and ctx.state.playing:
         count = shared.get("finger_count")
@@ -428,7 +399,6 @@ with st.sidebar:
                 unsafe_allow_html=True,
             )
 
-    # ── Manual zoom controls ───────────────────────────────────────
     st.divider()
     st.markdown("### 🔍 Zoom (manual)")
     zc1, zc2, zc3 = st.columns([1, 2, 1])
@@ -456,7 +426,6 @@ with st.sidebar:
         st.session_state.zoom_level = 1.0
         st.rerun()
 
-    # ── Process gesture queue ──────────────────────────────────────
     try:
         action = get_gesture_queue().get_nowait()
     except queue.Empty:
@@ -548,7 +517,7 @@ with right_col:
             st.rerun()
 
     if st.session_state.vector_store:
-        chat_container = st.container(height=520)
+        chat_container = st.container(height=390)
 
         with chat_container:
             if not st.session_state.chat_history:
