@@ -1,25 +1,24 @@
-#  Smart Presentation Assistant & PDF Intellectual Assistant  
-### Hand Gesture Control + AI PDF Chatbot (Streamlit Application)
+# SlidePilot — Smart Presentation Assistant  
+### Gesture Navigation · Zoom Control · AI PDF Chatbot
 
 **Author:** Niyati Bhandari   
 **Collaborators:** Raghav Khandelwal, Nityam Kalal, Parikshit Bishnoi, Suhani Jangid  
 
 ---
 
+
+
 ## Introduction
 
-This project combines **Computer Vision** and **AI-powered Document Retrieval (RAG)** into a unified intelligent system.
+SlidePilot is an intelligent PDF presentation assistant that combines **gesture-based slide navigation**, **gesture-controlled zooming**, and an **AI-powered PDF chatbot** in a single Streamlit application.
 
-It enables:
+Users can upload PDF documents, move between slides using hand gestures, zoom in or out with finger gestures, and ask questions about document content using an integrated AI assistant powered by Retrieval Augmented Generation (RAG).
 
-- Real-time **hand gesture based human–computer interaction**
-- Navigate PDF slides using simple **left/right hand gestures**
-- An **AI-powered PDF chatbot**
-- Document question answering using Large Language Models
+The system supports dual gesture modes (Navigation and Zoom), ensuring reliable interaction while minimizing false detections. This project demonstrates practical integration of Computer Vision and document-based AI for academic presentation automation.
 
 The system demonstrates practical integration of:
 
-- MediaPipe (Hand Tracking)
+- CVZone (MediaPipe-based Hand Tracking)
 - OpenCV (Computer Vision)
 - FAISS (Vector Database)
 - LangChain (RAG Pipeline)
@@ -27,13 +26,12 @@ The system demonstrates practical integration of:
 - Streamlit (User Interface)
 
 ---
-**Home Page:**  
+## Home Page
 Streamlit-based interface displaying PDF slide viewer, gesture control panel, and Groq-powered document assistant.
 <p align="left">
-  <img src="https://raw.githubusercontent.com/Niyatiii2111/SP0510---Major-Project/5bc771d89149149ac559ba111079aa279043476c/Home%20page.jpeg" width="500"/>
+  <img src="https://raw.githubusercontent.com/Niyatiii2111/SP0510---Major-Project/7f7740a96539d775317be7165a83cc0b54c7ca36/Slidepilot%20homepage.jpeg
+Project/5bc771d89149149ac559ba111079aa279043476c/Home%20page.jpeg" width="500"/>
   <br>
-  <em>Gesture Mapping for Slide Navigation</em>
-</p>
 
 
 
@@ -41,11 +39,18 @@ Streamlit-based interface displaying PDF slide viewer, gesture control panel, an
 
 ### Hand Gesture Control
 
-- Real-time webcam hand tracking
-- Slide navigation using finger-count gestures  
-- One finger / fist → Previous slide  
-- Four or more fingers → Next slide 
-
+- Real-time webcam hand tracking (CVZone + OpenCV)
+- Dual gesture modes: Navigation and Zoom
+- Fist hold (2 seconds) to switch modes
+- Navigation Mode:
+  - 1 finger → Previous slide
+  - 4-5 fingers → Next slide
+- Zoom Mode:
+  - 1 finger → Zoom In
+  - 4-5 fingers → Zoom Out
+- Dead zone for 2–3 fingers to avoid false triggers
+- Manual zoom controls as fallback
+- Visual gesture feedback and mode indicators
 ---
 
 ### PDF Intellectual Assistant
@@ -72,19 +77,26 @@ Streamlit-based interface displaying PDF slide viewer, gesture control panel, an
   <em>Gesture Mapping for Slide Navigation</em>
 </p>
 
-| Gesture | Action |
-|--------|--------|
-| 0–1 Fingers / Fist | Previous Slide |
-| 4–5 Fingers | Next Slide |
+| Mode | Gesture | Action |
+|------|---------|--------|
+| NAV | Fist (2sec) | Switch to Zoom Mode |
+| NAV | 1 finger | Previous Slide |
+| NAV | 4-5 fingers | Next Slide |
+| ZOOM | Fist (2sec) | Switch to Nav Mode |
+| ZOOM | 1 finger | Zoom In |
+| ZOOM | 4-5 fingers | Zoom Out |
+| Both | 2–3 fingers | Dead zone (no action) |
+
+
 
 ## Project Architecture
 
 ### Gesture Control Flow
-Webcam → CVZone HandDetector → Gesture Logic → Streamlit State → Slide Navigation
+Webcam → CVZone HandDetector → Gesture Logic → Streamlit State → Slide/Zoom Control
 
 
 ### PDF Chatbot (RAG) Flow
-PDF Upload → Text Extraction → Chunking → Embeddings → FAISS →Similarity Search → Groq LLM → Response
+PDF Upload → Text Extraction → Chunking → Embeddings → FAISS → Similarity Search → Groq LLM → Response
 
 
 ---
@@ -100,30 +112,16 @@ PDF Upload → Text Extraction → Chunking → Embeddings → FAISS →Similari
 ---
 
 
+# GROQ API SETUP (update)
 
-## Running the Application
-
-###  Gesture Control Module
-
-```bash
-python gesture_control.py
-```
-
-### PDF AI Chatbot Module
-
-```bash
-streamlit run pdf_chatbot.py
-```
+Your code now uses environment variable.
 
 ## Groq API Key Setup
 
-1. Create an API key at:
-https://console.groq.com
-2. Enter the API key inside the Streamlit sidebar  
-3. Upload PDF files  
-4. Click process pdf
+Set your API key as an environment variable.
 
 ---
+
 ## Resources, Tools and Packages
 
 ### Main Libraries
@@ -144,7 +142,7 @@ https://console.groq.com
 
 The application is now publicly accessible via Streamlit Cloud.
 
-🔗 *Open Web App:* https://your-streamlit-link-here.streamlit.app
+🔗 *Open Web App:* https://smart-presentation-bot.streamlit.app/
 
 > No installation required — works directly in browser
 
@@ -155,25 +153,12 @@ The application is now publicly accessible via Streamlit Cloud.
 - Ask document-based questions
 - Experience AI powered semantic search
 - Test the interface without local setup
-
 ---
 
-## My TODO List: Things that can be improved or added
-
-### Software Improvements
-
-- Refactor codebase  
-- Improve gesture accuracy  
-- Optimize cursor smoothing  
-- Improve error handling  
-
----
-
-### Feature Enhancements
+### Future Enhancements
 
 - Voice commands
-- Mouse cursor control using hand tracking  
-- Zoom in / zoom out gesture support   
+- Mouse cursor control using hand tracking    
 - Persistent chat history  
 - Document summarization  
 
