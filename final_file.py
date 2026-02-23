@@ -65,6 +65,18 @@ st.markdown("""
         margin-left: 8px;
         vertical-align: middle;
     }
+    .fullview-pill {
+        display: inline-block;
+        background: rgba(255,165,0,0.15);
+        border: 1px solid rgba(255,165,0,0.5);
+        color: #ffa500;
+        font-size: 0.75rem;
+        font-weight: 600;
+        border-radius: 20px;
+        padding: 2px 10px;
+        margin-left: 8px;
+        vertical-align: middle;
+    }
     .stButton > button[kind="secondary"] {
         background: transparent;
         border: 1px solid #e74c3c;
@@ -77,6 +89,12 @@ st.markdown("""
     .stButton > button[kind="secondary"]:hover {
         background: #e74c3c;
         color: white;
+    }
+    /* Full-view slide container */
+    .fullview-slide img {
+        max-height: 82vh !important;
+        width: auto !important;
+        max-width: 100% !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -112,6 +130,7 @@ st.markdown("""
     </div>
 </div>
 """, unsafe_allow_html=True)
+
 # ───────────────── ENV API KEY ─────────────────
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
@@ -130,6 +149,7 @@ _DEFAULTS = {
     "zoom_min": 0.5,
     "zoom_max": 3.0,
     "gesture_mode": "NAV",   # "NAV" or "ZOOM"
+    "full_view": False,       # ← NEW: full-view toggle
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -144,8 +164,8 @@ def get_shared_state():
     """Shared mutable dict: processor thread → Streamlit UI thread."""
     return {
         "finger_count":  None,
-        "gesture_mode":  "NAV",   # processor mirrors current mode here
-        "fist_hold_pct": 0.0,     # 0.0-1.0 for the hold progress bar
+        "gesture_mode":  "NAV",
+        "fist_hold_pct": 0.0,
     }
 
 if st.session_state.pages and not st.session_state.get("chat_processing", False):
@@ -324,6 +344,7 @@ with st.sidebar:
                 st.session_state.pages        = pages
                 st.session_state.current_page = 0
                 st.session_state.zoom_level   = 1.0
+                st.session_state.full_view    = False
                 st.success(f"✅ {len(pages)} slides loaded")
 
     st.divider()
@@ -455,102 +476,140 @@ with st.sidebar:
         st.rerun()
 
 
-# ───────────────── MAIN LAYOUT ─────────────────
-left_col, right_col = st.columns([7, 3])
+# ───────────────── HELPER: render the slide panel ─────────────────
+def render_slide_panel(full_view: bool = False):
+    """Renders the slide viewer. full_view=True uses a taller, centred layout."""
+    if not st.session_state.pages:
+        st.info("⬆️ Upload and process a PDF to get started.")
+        return
 
-with left_col:
-    if st.session_state.pages:
-        total = len(st.session_state.pages)
-        idx   = st.session_state.current_page
-        zoom  = st.session_state.zoom_level
+    total = len(st.session_state.pages)
+    idx   = st.session_state.current_page
+    zoom  = st.session_state.zoom_level
 
+    # ── top bar: slide counter + zoom pill + full-view toggle ──────
+    top_left, top_right = st.columns([6, 1])
+    with top_left:
+        fv_badge = '<span class="fullview-pill">⛶</span>' if full_view else ""
         st.markdown(
-            f'<div style="margin-bottom:8px;">'
+            f'<div style="margin-bottom:6px;">'
             f'<span style="font-size:1.1rem;font-weight:600;">📄 Slide {idx+1} / {total}</span>'
             f'<span class="zoom-pill">🔍 {zoom:.2f}×</span>'
+            f'{fv_badge}'
             f'</div>',
             unsafe_allow_html=True,
         )
-
-        img_b64      = base64.b64encode(st.session_state.pages[idx]).decode()
-        overflow_css = "hidden" if zoom > 1.0 else "visible"
-
-        st.markdown(
-            f'''<div style="overflow:{overflow_css}; min-height:300px; max-height:680px;
-                            display:flex; justify-content:center; align-items:center;
-                            border-radius:8px;">
-                  <img src="data:image/png;base64,{img_b64}"
-                       style="transform: scale({zoom});
-                              transform-origin: center center;
-                              transition: transform 0.35s cubic-bezier(0.25,0.46,0.45,0.94);
-                              width:100%; height:auto;" />
-                </div>''',
-            unsafe_allow_html=True,
-        )
-
-        b1, b2, b3 = st.columns([1, 2, 1])
-        with b1:
-            if st.button("⬅️ Prev", use_container_width=True):
-                st.session_state.current_page = max(0, idx - 1)
-                st.rerun()
-        with b2:
-            st.markdown(
-                f"<div style='text-align:center;color:#888;padding-top:8px;'>{idx+1} / {total}</div>",
-                unsafe_allow_html=True,
-            )
-        with b3:
-            if st.button("Next ➡️", use_container_width=True):
-                st.session_state.current_page = min(total - 1, idx + 1)
-                st.rerun()
-    else:
-        st.info("⬆️ Upload and process a PDF to get started.")
-
-
-# ───────────────── RIGHT COLUMN: CHAT ─────────────────
-with right_col:
-    hcol1, hcol2 = st.columns([3, 1])
-    with hcol1:
-        st.subheader("🤖 Groq Assistant")
-    with hcol2:
-        if st.button("🗑️ Clear", type="secondary", use_container_width=True):
-            st.session_state.chat_history = []
+    with top_right:
+        btn_label = "✕ Exit" if full_view else "⛶"
+        btn_help  = "Exit full view" if full_view else "Expand slide to full width"
+        if st.button(btn_label, use_container_width=True, help=btn_help):
+            st.session_state.full_view = not full_view
             st.rerun()
 
-    if st.session_state.vector_store:
-        chat_container = st.container(height=390)
+    # ── slide image ────────────────────────────────────────────────
+    img_b64      = base64.b64encode(st.session_state.pages[idx]).decode()
+    overflow_css = "hidden" if zoom > 1.0 else "visible"
+    max_h        = "88vh" if full_view else "680px"
+    img_width    = "auto" if full_view else "100%"
+    wrapper_cls  = "fullview-slide" if full_view else ""
 
-        with chat_container:
-            if not st.session_state.chat_history:
-                st.caption("💬 No messages yet. Ask something about your document!")
-            else:
-                for msg in st.session_state.chat_history:
-                    with st.chat_message(msg["role"]):
-                        st.markdown(msg["content"])
+    st.markdown(
+        f'''<div class="{wrapper_cls}" style="
+                overflow:{overflow_css};
+                min-height:300px;
+                max-height:{max_h};
+                display:flex;
+                justify-content:center;
+                align-items:center;
+                border-radius:8px;
+                background: rgba(0,0,0,0.04);">
+              <img src="data:image/png;base64,{img_b64}"
+                   style="transform: scale({zoom});
+                          transform-origin: center center;
+                          transition: transform 0.35s cubic-bezier(0.25,0.46,0.45,0.94);
+                          width:{img_width};
+                          max-width:100%;
+                          height:auto;" />
+            </div>''',
+        unsafe_allow_html=True,
+    )
 
-        prompt = st.chat_input("Ask about the document...", key="chat_input")
+    # ── prev / page counter / next ────────────────────────────────
+    b1, b2, b3 = st.columns([1, 2, 1])
+    with b1:
+        if st.button("⬅️ Prev", use_container_width=True, key=f"prev_{'fv' if full_view else 'nv'}"):
+            st.session_state.current_page = max(0, idx - 1)
+            st.rerun()
+    with b2:
+        st.markdown(
+            f"<div style='text-align:center;color:#888;padding-top:8px;'>{idx+1} / {total}</div>",
+            unsafe_allow_html=True,
+        )
+    with b3:
+        if st.button("Next ➡️", use_container_width=True, key=f"next_{'fv' if full_view else 'nv'}"):
+            st.session_state.current_page = min(total - 1, idx + 1)
+            st.rerun()
 
-        if prompt:
-            st.session_state.chat_history.append({"role": "user", "content": prompt})
+
+# ───────────────── MAIN LAYOUT ─────────────────
+full_view = st.session_state.full_view
+
+if full_view:
+    # ── Full-view: slide takes the entire main area ────────────────
+    render_slide_panel(full_view=True)
+
+else:
+    # ── Normal: side-by-side slide + chat ─────────────────────────
+    left_col, right_col = st.columns([7, 3])
+
+    with left_col:
+        render_slide_panel(full_view=False)
+
+    # ───────────────── RIGHT COLUMN: CHAT ─────────────────────────
+    with right_col:
+        hcol1, hcol2 = st.columns([3, 1])
+        with hcol1:
+            st.subheader("🤖 Groq Assistant")
+        with hcol2:
+            if st.button("🗑️ Clear", type="secondary", use_container_width=True):
+                st.session_state.chat_history = []
+                st.rerun()
+
+        if st.session_state.vector_store:
+            chat_container = st.container(height=390)
+
             with chat_container:
-                with st.chat_message("user"):
-                    st.markdown(prompt)
+                if not st.session_state.chat_history:
+                    st.caption("💬 No messages yet. Ask something about your document!")
+                else:
+                    for msg in st.session_state.chat_history:
+                        with st.chat_message(msg["role"]):
+                            st.markdown(msg["content"])
 
-            with chat_container:
-                with st.chat_message("assistant"):
-                    if is_small_talk(prompt):
-                        reply = "Hello! 👋 I'm here to help you with the document. Feel free to ask me anything about it!"
-                        st.markdown(reply)
-                        st.session_state.chat_history.append({"role": "assistant", "content": reply})
-                    else:
-                        try:
-                            docs    = st.session_state.vector_store.similarity_search(prompt, k=3)
-                            context = "\n\n".join(d.page_content for d in docs)
-                            history_msgs = st.session_state.chat_history[-6:]
-                            history = "\n".join(
-                                f"{m['role'].capitalize()}: {m['content']}" for m in history_msgs
-                            )
+            prompt = st.chat_input("Ask about the document...", key="chat_input")
 
-                            template = """You are a helpful assistant for a PDF document.
+            if prompt:
+                st.session_state.chat_history.append({"role": "user", "content": prompt})
+                with chat_container:
+                    with st.chat_message("user"):
+                        st.markdown(prompt)
+
+                with chat_container:
+                    with st.chat_message("assistant"):
+                        if is_small_talk(prompt):
+                            reply = "Hello! 👋 I'm here to help you with the document. Feel free to ask me anything about it!"
+                            st.markdown(reply)
+                            st.session_state.chat_history.append({"role": "assistant", "content": reply})
+                        else:
+                            try:
+                                docs    = st.session_state.vector_store.similarity_search(prompt, k=3)
+                                context = "\n\n".join(d.page_content for d in docs)
+                                history_msgs = st.session_state.chat_history[-6:]
+                                history = "\n".join(
+                                    f"{m['role'].capitalize()}: {m['content']}" for m in history_msgs
+                                )
+
+                                template = """You are a helpful assistant for a PDF document.
 Use the context below to answer the user's question accurately.
 If the question is unrelated to the document, politely say so.
 Do not make up information not in the context.
@@ -563,30 +622,30 @@ Conversation history:
 
 Question: {question}
 Answer:"""
-                            prompt_template = PromptTemplate.from_template(template)
-                            llm = ChatGroq(
-                                groq_api_key=GROQ_API_KEY,
-                                model_name="llama-3.1-8b-instant",
-                                temperature=0.5,
-                            )
-                            chain = prompt_template | llm
+                                prompt_template = PromptTemplate.from_template(template)
+                                llm = ChatGroq(
+                                    groq_api_key=GROQ_API_KEY,
+                                    model_name="llama-3.1-8b-instant",
+                                    temperature=0.5,
+                                )
+                                chain = prompt_template | llm
 
-                            full_response = st.write_stream(
-                                chunk.content for chunk in chain.stream({
-                                    "context": context,
-                                    "question": prompt,
-                                    "history": history,
+                                full_response = st.write_stream(
+                                    chunk.content for chunk in chain.stream({
+                                        "context": context,
+                                        "question": prompt,
+                                        "history": history,
+                                    })
+                                )
+                                st.session_state.chat_history.append({
+                                    "role": "assistant", "content": full_response
                                 })
-                            )
-                            st.session_state.chat_history.append({
-                                "role": "assistant", "content": full_response
-                            })
 
-                        except Exception as e:
-                            err_msg = f"⚠️ Error: {str(e)}"
-                            st.error(err_msg)
-                            st.session_state.chat_history.append({
-                                "role": "assistant", "content": err_msg
-                            })
-    else:
-        st.info("⬅️ Process a PDF first to enable the assistant.")
+                            except Exception as e:
+                                err_msg = f"⚠️ Error: {str(e)}"
+                                st.error(err_msg)
+                                st.session_state.chat_history.append({
+                                    "role": "assistant", "content": err_msg
+                                })
+        else:
+            st.info("⬅️ Process a PDF first to enable the assistant.")
