@@ -16,7 +16,20 @@ from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from PyPDF2 import PdfReader
-from streamlit_webrtc import VideoProcessorBase, webrtc_streamer
+from streamlit_webrtc import VideoProcessorBase, webrtc_streamer, RTCConfiguration
+
+# ── Explicit STUN servers so WebRTC ICE negotiation succeeds even
+#    after Streamlit reruns triggered by PDF loading / fragments.
+#    Without this, the browser falls back to host-only ICE candidates
+#    which fail on most networks / Docker / cloud deployments.
+RTC_CONFIGURATION = RTCConfiguration({
+    "iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": ["stun:stun1.l.google.com:19302"]},
+        {"urls": ["stun:stun2.l.google.com:19302"]},
+        {"urls": ["stun:stun3.l.google.com:19302"]},
+    ]
+})
 
 # ───────────────── PAGE CONFIG ─────────────────
 st.set_page_config(page_title="SlidePilot", layout="wide")
@@ -108,9 +121,6 @@ st.markdown("""
 
     /* ══════════════════════════════════════════════════════════════
        PRESENTATION MODE
-       When .present-active is injected on <body> via JS, every
-       Streamlit chrome element is hidden and the main block becomes
-       a true zero-padding full-viewport canvas.
        ══════════════════════════════════════════════════════════════ */
     body.present-active [data-testid="stSidebar"],
     body.present-active [data-testid="stHeader"],
@@ -128,9 +138,6 @@ st.markdown("""
         max-width: 100vw !important;
     }
 
-    /* ── Present mode: slide area ───────────────────────────────────
-       Image fills the viewport minus the sticky nav bar (56px).
-       object-fit: contain preserves aspect ratio on any screen.      */
     .present-slide-wrap {
         width: 100%;
         height: calc(100vh - 56px);
@@ -147,10 +154,6 @@ st.markdown("""
         display: block;
     }
 
-    /* ── Sticky nav bar pinned to bottom of viewport ────────────────
-       position:sticky + bottom:0 keeps it visible without fixed
-       positioning, so Streamlit buttons inside remain clickable.
-       Fades to 20% opacity — unhide on hover so it's unobtrusive.   */
     .present-nav-bar {
         position: sticky;
         bottom: 0;
@@ -252,18 +255,12 @@ _DEFAULTS = {
     "zoom_max": 3.0,
     "gesture_mode": "NAV",
     "full_view": False,
-    "present_mode": False,   # ← NEW: true fullscreen presentation
+    "present_mode": False,
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ── FIX 1: State Sync Header ────────────────────────────────────────
-# This runs at the very top of every script execution, before any UI
-# element is drawn.  If the WebRTC thread changed gesture_mode in the
-# shared dict, we sync it to session_state and force a full rerun so
-# every widget (especially the sidebar gesture-guide table) redraws
-# with the correct mode context.
 @st.cache_resource
 def get_gesture_queue():
     """Single-slot queue: only the freshest gesture reaches the UI."""
@@ -282,7 +279,7 @@ def get_shared_state():
 _shared_boot = get_shared_state()
 if _shared_boot["gesture_mode"] != st.session_state.gesture_mode:
     st.session_state.gesture_mode = _shared_boot["gesture_mode"]
-    st.rerun()   # redraw everything with the new mode before showing any UI
+    st.rerun()
 
 
 # ───────────────── SMALL-TALK DETECTOR ─────────────────
@@ -321,37 +318,13 @@ def build_vector_store(text):
     return FAISS.from_texts(chunks, embeddings)
 
 # ═══════════════════════════════════════════════════════════════════
-#  GESTURE PROCESSOR  —  v2: Frame-Buffer + Edge-Triggered FSM
-# ═══════════════════════════════════════════════════════════════════
-#
-#  Architecture
-#  ────────────
-#  1. FRAME BUFFER  (deque, maxlen=BUFFER_SIZE)
-#     Every frame appends the raw finger-count.  We derive a
-#     `stable_gesture` as the statistical mode of the buffer.
-#     This kills single-frame jitter completely.
-#
-#  2. EDGE-TRIGGERED FSM  (per-mode)
-#     NAV mode states:   NEUTRAL → ACTION_FIRED → WAIT_FOR_RESET → NEUTRAL
-#     ZOOM mode states:  same pattern, different actions
-#
-#     • NEUTRAL        – waiting for a decisive gesture.
-#     • ACTION_FIRED   – one action was queued; transition immediately
-#                        to WAIT_FOR_RESET so the gesture can't repeat.
-#     • WAIT_FOR_RESET – ignores all nav/zoom gestures until the hand
-#                        returns to the dead zone (2-3 fingers) OR
-#                        leaves the frame.  No time-based cooldowns needed.
-#
-#  3. FIST / MODE-SWITCH  (independent of FSM)
-#     Fist detection keeps its own timer so it doesn't interfere
-#     with the NAV/ZOOM FSM.
-#
+#  GESTURE PROCESSOR
 # ═══════════════════════════════════════════════════════════════════
 
-_BUFFER_SIZE       = 6    # frames to smooth over (~200 ms at 30 fps)
+_BUFFER_SIZE       = 6
 _FIST_HOLD_SECONDS = 2.0
-_DEAD_ZONE         = {2, 3}   # finger counts that mean "do nothing"
-_NO_HAND_SENTINEL  = -1       # sentinel stored in buffer when no hand present
+_DEAD_ZONE         = {2, 3}
+_NO_HAND_SENTINEL  = -1
 
 
 class GestureProcessor(VideoProcessorBase):
@@ -359,21 +332,12 @@ class GestureProcessor(VideoProcessorBase):
     def __init__(self):
         self.detector    = HandDetector(maxHands=1, detectionCon=0.5)
         self.mode        = "NAV"
-
-        # ── Phase 1: frame buffer ───────────────────────────────────
-        # Pre-fill with the dead-zone value so the FSM starts neutral.
         self.frame_buffer: deque[int] = deque(
             [_NO_HAND_SENTINEL] * _BUFFER_SIZE, maxlen=_BUFFER_SIZE
         )
-
-        # ── Phase 2: FSM state ──────────────────────────────────────
-        # One FSM for NAV, one for ZOOM — they reset independently.
         self._fsm: dict[str, str] = {"NAV": "NEUTRAL", "ZOOM": "NEUTRAL"}
-
-        # ── Fist / mode-switch (timer-based, unchanged) ─────────────
         self.fist_start  = None
 
-    # ── helpers ────────────────────────────────────────────────────
     @staticmethod
     def _put(img, text, pos, scale=0.60, color=(200, 200, 200), thickness=2):
         cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX,
@@ -386,32 +350,23 @@ class GestureProcessor(VideoProcessorBase):
             cv2.rectangle(img, (10, y), (10 + int(200 * pct), y + 10), color, -1)
 
     def _stable_gesture(self) -> int:
-        """Return the statistical mode of the frame buffer.
-
-        Falls back to the most recent value on a tie so we never crash.
-        """
         try:
             return stat_mode(self.frame_buffer)
         except Exception:
             return self.frame_buffer[-1]
 
     def _fsm_step(self, mode: str, stable: int) -> str | None:
-        """Run one FSM tick for the given mode.
-
-        Returns an action string to enqueue, or None.
-        """
         state = self._fsm[mode]
         is_dead  = stable in _DEAD_ZONE or stable == _NO_HAND_SENTINEL
 
         if state == "WAIT_FOR_RESET":
-            # ── must see neutral / dead zone before acting again ────
             if is_dead:
                 self._fsm[mode] = "NEUTRAL"
-            return None   # nothing to fire yet
+            return None
 
         if state == "NEUTRAL":
             if is_dead:
-                return None   # stay neutral
+                return None
 
             if mode == "NAV":
                 if stable <= 1:
@@ -420,7 +375,7 @@ class GestureProcessor(VideoProcessorBase):
                     action = "RIGHT"
                 else:
                     return None
-            else:  # ZOOM
+            else:
                 if stable <= 1:
                     action = "ZOOM_IN"
                 elif stable >= 4:
@@ -431,8 +386,6 @@ class GestureProcessor(VideoProcessorBase):
             self._fsm[mode] = "WAIT_FOR_RESET"
             return action
 
-        # ACTION_FIRED is transient — we go straight to WAIT_FOR_RESET
-        # in the same tick, so this branch is never actually reached.
         return None
 
     def recv(self, frame):
@@ -442,13 +395,11 @@ class GestureProcessor(VideoProcessorBase):
         hands, small = self.detector.findHands(small, draw=True)
         shared       = get_shared_state()
 
-        # Sync mode from shared state (Streamlit may have changed it via button)
         self.mode = shared["gesture_mode"]
         is_zoom   = self.mode == "ZOOM"
         mode_color = (50, 200, 100) if is_zoom else (102, 126, 234)
         now        = time.time()
 
-        # ── Phase 1: update buffer ──────────────────────────────────
         if hands:
             fingers = self.detector.fingersUp(hands[0])
             total   = sum(fingers)
@@ -462,7 +413,6 @@ class GestureProcessor(VideoProcessorBase):
 
         stable = self._stable_gesture()
 
-        # ── Fist / mode-switch detection ────────────────────────────
         if stable == 0:
             if self.fist_start is None:
                 self.fist_start = now
@@ -477,7 +427,6 @@ class GestureProcessor(VideoProcessorBase):
                 new_mode = "ZOOM" if self.mode == "NAV" else "NAV"
                 self.mode              = new_mode
                 shared["gesture_mode"] = new_mode
-                # Reset BOTH FSMs on a mode switch
                 self._fsm = {"NAV": "NEUTRAL", "ZOOM": "NEUTRAL"}
                 self.frame_buffer = deque(
                     [_NO_HAND_SENTINEL] * _BUFFER_SIZE, maxlen=_BUFFER_SIZE
@@ -493,16 +442,14 @@ class GestureProcessor(VideoProcessorBase):
                 self.fist_start = None
                 shared["fist_hold_pct"] = 0.0
 
-            # ── Phase 2: FSM step ───────────────────────────────────
             action = self._fsm_step(self.mode, stable)
 
             if action:
                 try:
                     get_gesture_queue().put_nowait(action)
                 except queue.Full:
-                    pass   # previous action not yet consumed — skip
+                    pass
 
-            # ── OSD labels ─────────────────────────────────────────
             fsm_state = self._fsm[self.mode]
             shared["fsm_state"] = fsm_state
 
@@ -534,15 +481,9 @@ class GestureProcessor(VideoProcessorBase):
 
 # ═══════════════════════════════════════════════════════════════════
 #  PRESENTATION MODE RENDERER
-#  Covers 100vw × 100vh with a black background.
-#  All Streamlit chrome (sidebar, header, toolbar) is hidden via
-#  a JS snippet that adds .present-active to <body>.
-#  The floating control bar fades in on hover so it doesn't
-#  distract the audience during a real presentation.
 # ═══════════════════════════════════════════════════════════════════
 
 def _inject_present_body_class(active: bool):
-    """Add / remove .present-active on <body> via a tiny JS snippet."""
     action = "add" if active else "remove"
     st.markdown(
         f"""<script>
@@ -556,25 +497,6 @@ def _inject_present_body_class(active: bool):
 
 @st.fragment(run_every="0.4s")
 def render_present_mode():
-    """True fullscreen presentation renderer — runs as a fast fragment
-    so gesture navigation keeps working exactly like in normal mode.
-
-    Layout (no scroll needed):
-    ┌──────────────────────────────────────────┐
-    │                                          │
-    │   slide image  (calc(100vh - 56px))      │
-    │   object-fit: contain  •  bg: #000       │
-    │                                          │
-    ├──────────────────────────────────────────┤
-    │  ⬅ Prev   N / Total   Next ➡   ✕ Exit   │  ← sticky bar, 56 px
-    └──────────────────────────────────────────┘
-
-    The nav bar fades to 20% opacity when not hovered so it doesn't
-    distract the audience; it's always clickable and keyboard-reachable.
-    Streamlit chrome (sidebar, header, footer) is hidden via JS body class.
-    """
-
-    # ── 1. Poll gesture queue (same logic as slide_fragment) ────────
     try:
         action = get_gesture_queue().get_nowait()
     except queue.Empty:
@@ -596,7 +518,6 @@ def render_present_mode():
             elif action == "RIGHT":
                 st.session_state.current_page = min(n - 1, st.session_state.current_page + 1)
 
-    # ── 2. Hide all Streamlit chrome ────────────────────────────────
     _inject_present_body_class(True)
 
     if not st.session_state.pages:
@@ -607,7 +528,6 @@ def render_present_mode():
     idx     = st.session_state.current_page
     img_b64 = base64.b64encode(st.session_state.pages[idx]).decode()
 
-    # ── 3. Full-viewport slide (calc(100vh - 56px) tall) ────────────
     st.markdown(
         f'<div class="present-slide-wrap">'
         f'  <img src="data:image/png;base64,{img_b64}" alt="Slide {idx+1}" />'
@@ -615,11 +535,6 @@ def render_present_mode():
         unsafe_allow_html=True,
     )
 
-    # ── 4. Sticky nav bar with REAL Streamlit buttons ───────────────
-    # We open the .present-nav-bar div, then render real st.columns
-    # buttons inside it, then close.  Because st.markdown and
-    # st.columns render into the same Streamlit block, the columns
-    # div ends up as a child of the wrapping container in the DOM.
     st.markdown('<div class="present-nav-bar">', unsafe_allow_html=True)
 
     c_prev, c_counter, c_next, c_exit = st.columns([1, 2, 1, 1])
@@ -654,23 +569,8 @@ def render_present_mode():
     st.markdown('</div>', unsafe_allow_html=True)
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Requires Streamlit ≥ 1.37.  If your version is older, remove the
-# @st.fragment decorator and add st_autorefresh(interval=400) instead:
-#
-#   from streamlit_autorefresh import st_autorefresh
-#   st_autorefresh(interval=400, key="gesture_refresh")
-#
-# ═══════════════════════════════════════════════════════════════════
-
-@st.fragment(run_every="0.4s")          # ← replaces st_autorefresh
+@st.fragment(run_every="0.4s")
 def slide_fragment(full_view: bool = False):
-    """Polls the gesture queue and renders the slide.
-
-    Because this is a fragment, only this region reruns every 400 ms.
-    The chat column (heavy LLM streaming) is untouched.
-    """
-    # ── consume any pending gesture ────────────────────────────────
     try:
         action = get_gesture_queue().get_nowait()
     except queue.Empty:
@@ -683,9 +583,6 @@ def slide_fragment(full_view: bool = False):
             new_mode = "ZOOM" if action == "MODE_ZOOM" else "NAV"
             st.session_state.gesture_mode = new_mode
             shared["gesture_mode"]        = new_mode
-            # BUG 1 FIX: st.rerun() inside a fragment triggers a FULL-APP
-            # rerun (Streamlit ≥ 1.37), so the sidebar gesture-guide table
-            # re-renders immediately with the new mode.
             st.rerun()
         elif st.session_state.pages:
             total_pages = len(st.session_state.pages)
@@ -705,12 +602,10 @@ def slide_fragment(full_view: bool = False):
                     round(st.session_state.zoom_level - st.session_state.zoom_step, 2)
                 )
 
-    # ── render slide ───────────────────────────────────────────────
     _render_slide(full_view=full_view)
 
 
 def _render_slide(full_view: bool = False):
-    """Pure rendering helper — no queue logic here."""
     if not st.session_state.pages:
         st.info("⬆️ Upload and process a PDF to get started.")
         return
@@ -719,8 +614,6 @@ def _render_slide(full_view: bool = False):
     idx   = st.session_state.current_page
     zoom  = st.session_state.zoom_level
 
-    # ── FIX 2: Control bar ABOVE the image so it never moves ───────
-    # Layout: [← Prev]  [Slide N/T  🔍zoom  pill]  [Next →]  [⛶]
     ctrl_prev, ctrl_info, ctrl_next, ctrl_fv = st.columns([1, 5, 1, 1])
 
     with ctrl_prev:
@@ -756,10 +649,6 @@ def _render_slide(full_view: bool = False):
             st.session_state.full_view = not full_view
             st.rerun()
 
-    # ── FIX 2 cont.: Image locked inside a fixed-height container ──
-    # When zoom > 1 the image is CSS-scaled inside its box, so it
-    # never pushes elements below it.  The container scrolls
-    # independently, keeping the page layout completely stable.
     container_h = "82vh" if full_view else "600px"
     img_b64     = base64.b64encode(st.session_state.pages[idx]).decode()
 
@@ -806,15 +695,10 @@ with st.sidebar:
                 st.session_state.full_view    = False
                 st.success(f"✅ {len(pages)} slides loaded")
 
-    # ── FIX 4: Unload / reset button ───────────────────────────────
     if st.session_state.pages:
         if st.button("🗑️ Unload Document", use_container_width=True,
                      help="Clear all slides, embeddings and chat history"):
-            # BUG 2 FIX: @st.cache_resource is a process-level cache —
-            # setting session_state.vector_store = None only drops the
-            # *reference* in this session; the FAISS index (embeddings +
-            # vectors) stays alive in memory until .clear() is called.
-            build_vector_store.clear()          # ← actually frees memory
+            build_vector_store.clear()
             st.session_state.pages         = []
             st.session_state.vector_store  = None
             st.session_state.current_page  = 0
@@ -825,11 +709,10 @@ with st.sidebar:
             st.toast("✅ Document unloaded — vectors freed from memory.", icon="🗑️")
             st.rerun()
 
-        # ── Present button ──────────────────────────────────────────
         if st.button("▶ Present", use_container_width=True,
                      help="Enter full-screen presentation mode — sidebar and chrome hidden"):
             st.session_state.present_mode = True
-            st.session_state.full_view    = False   # mutually exclusive
+            st.session_state.full_view    = False
             st.rerun()
 
     st.divider()
@@ -872,10 +755,12 @@ with st.sidebar:
 
     st.divider()
 
+    # ── FIX: Pass RTC_CONFIGURATION so ICE negotiation works after reruns ──
     ctx = webrtc_streamer(
         key="gesture",
         video_processor_factory=GestureProcessor,
         async_processing=True,
+        rtc_configuration=RTC_CONFIGURATION,
         media_stream_constraints={"video": {"width": 320, "height": 240}, "audio": False},
     )
 
@@ -934,21 +819,17 @@ present_mode = st.session_state.present_mode
 full_view    = st.session_state.full_view
 
 if present_mode:
-    # ── Presentation mode: fullscreen, no chrome ───────────────────
     render_present_mode()
 
 elif full_view:
-    # ── Full-view: slide takes the entire main area ────────────────
     slide_fragment(full_view=True)
 
 else:
-    # ── Normal: side-by-side slide + chat ─────────────────────────
     left_col, right_col = st.columns([7, 3])
 
     with left_col:
         slide_fragment(full_view=False)
 
-    # ───────────────── RIGHT COLUMN: CHAT ─────────────────────────
     with right_col:
         hcol1, hcol2 = st.columns([3, 1])
         with hcol1:
