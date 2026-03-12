@@ -2,6 +2,7 @@ import os
 import time
 import queue
 import base64
+import requests
 from collections import deque
 from statistics import mode as stat_mode
 
@@ -18,37 +19,71 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from PyPDF2 import PdfReader
 from streamlit_webrtc import VideoProcessorBase, webrtc_streamer, RTCConfiguration
 
-# ── ICE servers: STUN + TURN relay fallback.
+
+# ═══════════════════════════════════════════════════════════════════
+#  ICE / TURN CONFIGURATION
 #
-#    WHY THIS MATTERS:
-#    • STUN-only works initially but breaks after a few minutes on
-#      symmetric NAT (common in home/office routers) because the router
-#      rotates its UDP port mapping.
-#    • A TURN relay tunnels media through a server when P2P fails,
-#      keeping the connection alive indefinitely.
-#    • openrelay.metered.ca is a free public TURN service.
-#      For production swap in your own coturn / Twilio / Metered creds.
-RTC_CONFIGURATION = RTCConfiguration({
-    "iceServers": [
-        {"urls": ["stun:stun.l.google.com:19302"]},
-        {"urls": ["stun:stun1.l.google.com:19302"]},
-        {
-            "urls": ["turn:openrelay.metered.ca:80"],
-            "username": "openrelayproject",
-            "credential": "openrelayproject",
-        },
-        {
-            "urls": ["turn:openrelay.metered.ca:443"],
-            "username": "openrelayproject",
-            "credential": "openrelayproject",
-        },
-        {
-            "urls": ["turn:openrelay.metered.ca:443?transport=tcp"],
-            "username": "openrelayproject",
-            "credential": "openrelayproject",
-        },
-    ]
-})
+#  This function is called ONCE at startup (cached).  It tries three
+#  credential sources in priority order:
+#
+#  1. Twilio NTS  — most reliable, free tier available.
+#     Set env vars: TWILIO_ACCOUNT_SID  +  TWILIO_AUTH_TOKEN
+#     Sign up at: https://www.twilio.com/try-twilio
+#
+#  2. Metered.ca  — free 50 GB/mo TURN tier, easy setup.
+#     Set env var: METERED_API_KEY
+#     Sign up at: https://www.metered.ca/tools/openrelay/
+#     Replace "YOUR_APP_NAME" below with your Metered app name.
+#
+#  3. STUN-only fallback  — works when browser and Python server
+#     are on the same machine / same LAN (local dev, same-host
+#     cloud deployment).  Fails on most symmetric-NAT networks.
+#
+#  For Streamlit Cloud: add secrets in the dashboard or .streamlit/secrets.toml
+# ═══════════════════════════════════════════════════════════════════
+
+@st.cache_resource
+def get_rtc_configuration() -> RTCConfiguration:
+    """Build ICE config once; cache for the lifetime of the process."""
+
+    # ── 1. Twilio NTS ────────────────────────────────────────────────
+    twilio_sid   = os.getenv("TWILIO_ACCOUNT_SID")
+    twilio_token = os.getenv("TWILIO_AUTH_TOKEN")
+    if twilio_sid and twilio_token:
+        try:
+            from twilio.rest import Client
+            token = Client(twilio_sid, twilio_token).tokens.create()
+            return RTCConfiguration({"iceServers": token.ice_servers})
+        except Exception as e:
+            st.warning(f"⚠️ Twilio TURN init failed ({e}). Trying next option…")
+
+    # ── 2. Metered.ca REST API ───────────────────────────────────────
+    metered_key  = os.getenv("METERED_API_KEY")
+    metered_app  = os.getenv("METERED_APP_NAME", "slidepilot")   # your app name
+    if metered_key:
+        try:
+            url  = f"https://{metered_app}.metered.live/api/v1/turn/credentials"
+            resp = requests.get(url, params={"apiKey": metered_key}, timeout=5)
+            resp.raise_for_status()
+            ice  = resp.json()
+            if ice:
+                return RTCConfiguration({"iceServers": ice})
+        except Exception as e:
+            st.warning(f"⚠️ Metered.ca TURN init failed ({e}). Falling back to STUN…")
+
+    # ── 3. STUN-only fallback ────────────────────────────────────────
+    # Works for: localhost, same-LAN, or any server with a public IP
+    # where browser and aiortc server can reach each other directly.
+    return RTCConfiguration({
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {"urls": ["stun:stun1.l.google.com:19302"]},
+            {"urls": ["stun:stun2.l.google.com:19302"]},
+            {"urls": ["stun:stun3.l.google.com:19302"]},
+            {"urls": ["stun:stun4.l.google.com:19302"]},
+        ]
+    })
+
 
 # ───────────────── PAGE CONFIG ─────────────────
 st.set_page_config(page_title="SlidePilot", layout="wide")
@@ -151,15 +186,24 @@ st.markdown("""
         background: rgba(255,255,255,0.08) !important;
         border: 1px solid rgba(255,255,255,0.35) !important;
         color: #fff !important; border-radius: 8px !important;
-        font-weight: 700 !important; transition: background 0.2s !important;
+        font-weight: 700 !important;
     }
     .present-nav-bar button:hover { background: rgba(255,255,255,0.22) !important; }
     .present-exit button { border-color: rgba(231,76,60,0.6) !important; color: #ff6b6b !important; }
-    .present-exit button:hover { background: rgba(231,76,60,0.28) !important; }
     .present-counter {
         color: rgba(255,255,255,0.65); font-size: 0.88rem; font-weight: 600;
         min-width: 90px; text-align: center; letter-spacing: 1px; user-select: none;
     }
+    .turn-setup-box {
+        background: rgba(255,165,0,0.08);
+        border: 1px solid rgba(255,165,0,0.35);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 0.78rem;
+        color: #ccc;
+        margin-top: 6px;
+    }
+    .turn-setup-box a { color: #ffa500; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -414,14 +458,14 @@ def render_present_mode():
             new_mode = "ZOOM" if action == "MODE_ZOOM" else "NAV"
             st.session_state.gesture_mode = new_mode
             shared["gesture_mode"]        = new_mode
-            st.rerun()                    # full — sidebar must update
+            st.rerun()
         elif st.session_state.pages:
             n = len(st.session_state.pages)
             if action == "LEFT":
                 st.session_state.current_page = max(0, st.session_state.current_page - 1)
             elif action == "RIGHT":
                 st.session_state.current_page = min(n - 1, st.session_state.current_page + 1)
-            st.rerun(scope="fragment")    # ← does NOT touch WebRTC
+            st.rerun(scope="fragment")
 
     _inject_present_body_class(True)
 
@@ -441,41 +485,31 @@ def render_present_mode():
 
     st.markdown('<div class="present-nav-bar">', unsafe_allow_html=True)
     c_prev, c_counter, c_next, c_exit = st.columns([1, 2, 1, 1])
-
     with c_prev:
         if st.button("⬅️ Prev", key="pm_prev", use_container_width=True):
             st.session_state.current_page = max(0, idx - 1)
-            st.rerun(scope="fragment")    # ← fragment-scoped
-
+            st.rerun(scope="fragment")
     with c_counter:
         st.markdown(
             f'<div class="present-counter">Slide &nbsp; {idx+1} &nbsp;/&nbsp; {total}</div>',
             unsafe_allow_html=True,
         )
-
     with c_next:
         if st.button("Next ➡️", key="pm_next", use_container_width=True):
             st.session_state.current_page = min(total - 1, idx + 1)
-            st.rerun(scope="fragment")    # ← fragment-scoped
-
+            st.rerun(scope="fragment")
     with c_exit:
         st.markdown('<div class="present-exit">', unsafe_allow_html=True)
         if st.button("✕ Exit", key="pm_exit", use_container_width=True):
             st.session_state.present_mode = False
             _inject_present_body_class(False)
-            st.rerun()                    # full — restore chrome
+            st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
-
     st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════════════════════════
 #  SLIDE FRAGMENT
-#  KEY RULE: only st.rerun(scope="fragment") for slide/zoom changes.
-#  Full st.rerun() only on mode switch (sidebar must redraw).
-#  This means the sidebar — and the webrtc_streamer widget inside it —
-#  is NEVER torn down by normal navigation, so the peer connection
-#  stays alive for the entire session.
 # ═══════════════════════════════════════════════════════════════════
 @st.fragment(run_every="0.4s")
 def slide_fragment(full_view: bool = False):
@@ -491,36 +525,30 @@ def slide_fragment(full_view: bool = False):
             new_mode = "ZOOM" if action == "MODE_ZOOM" else "NAV"
             st.session_state.gesture_mode = new_mode
             shared["gesture_mode"]        = new_mode
-            st.rerun()                    # full — sidebar badge must flip
-
+            st.rerun()   # full — sidebar badge must flip
         elif st.session_state.pages:
             total_pages = len(st.session_state.pages)
             changed = False
             if action == "LEFT":
                 new = max(0, st.session_state.current_page - 1)
                 if new != st.session_state.current_page:
-                    st.session_state.current_page = new
-                    changed = True
+                    st.session_state.current_page = new; changed = True
             elif action == "RIGHT":
                 new = min(total_pages - 1, st.session_state.current_page + 1)
                 if new != st.session_state.current_page:
-                    st.session_state.current_page = new
-                    changed = True
+                    st.session_state.current_page = new; changed = True
             elif action == "ZOOM_IN":
                 new = min(st.session_state.zoom_max,
                           round(st.session_state.zoom_level + st.session_state.zoom_step, 2))
                 if new != st.session_state.zoom_level:
-                    st.session_state.zoom_level = new
-                    changed = True
+                    st.session_state.zoom_level = new; changed = True
             elif action == "ZOOM_OUT":
                 new = max(st.session_state.zoom_min,
                           round(st.session_state.zoom_level - st.session_state.zoom_step, 2))
                 if new != st.session_state.zoom_level:
-                    st.session_state.zoom_level = new
-                    changed = True
-
+                    st.session_state.zoom_level = new; changed = True
             if changed:
-                st.rerun(scope="fragment")   # ← WebRTC stays alive
+                st.rerun(scope="fragment")   # sidebar / WebRTC untouched
 
     _render_slide(full_view=full_view)
 
@@ -535,42 +563,33 @@ def _render_slide(full_view: bool = False):
     zoom  = st.session_state.zoom_level
 
     ctrl_prev, ctrl_info, ctrl_next, ctrl_fv = st.columns([1, 5, 1, 1])
-
     with ctrl_prev:
         if st.button("⬅️", use_container_width=True,
-                     key=f"prev_{'fv' if full_view else 'nv'}",
-                     help="Previous slide"):
+                     key=f"prev_{'fv' if full_view else 'nv'}"):
             st.session_state.current_page = max(0, idx - 1)
-            st.rerun(scope="fragment")    # ← fragment-scoped
-
+            st.rerun(scope="fragment")
     with ctrl_info:
         fv_badge = '<span class="fullview-pill">⛶ full</span>' if full_view else ""
         st.markdown(
             f'<div style="padding-top:6px;">'
             f'<span style="font-size:1.05rem;font-weight:600;">📄 Slide {idx+1} / {total}</span>'
-            f'<span class="zoom-pill">🔍 {zoom:.2f}×</span>'
-            f'{fv_badge}</div>',
+            f'<span class="zoom-pill">🔍 {zoom:.2f}×</span>{fv_badge}</div>',
             unsafe_allow_html=True,
         )
-
     with ctrl_next:
         if st.button("➡️", use_container_width=True,
-                     key=f"next_{'fv' if full_view else 'nv'}",
-                     help="Next slide"):
+                     key=f"next_{'fv' if full_view else 'nv'}"):
             st.session_state.current_page = min(total - 1, idx + 1)
-            st.rerun(scope="fragment")    # ← fragment-scoped
-
+            st.rerun(scope="fragment")
     with ctrl_fv:
         btn_label = "✕" if full_view else "⛶"
-        btn_help  = "Exit full view" if full_view else "Expand to full width"
-        if st.button(btn_label, use_container_width=True, help=btn_help,
+        if st.button(btn_label, use_container_width=True,
                      key=f"fv_toggle_{'fv' if full_view else 'nv'}"):
             st.session_state.full_view = not full_view
-            st.rerun()   # full — main column layout must change
+            st.rerun()   # full — column layout changes
 
     container_h = "82vh" if full_view else "600px"
     img_b64     = base64.b64encode(st.session_state.pages[idx]).decode()
-
     st.markdown(
         f'''<div style="overflow:auto;height:{container_h};display:flex;
                         justify-content:center;align-items:center;
@@ -584,7 +603,9 @@ def _render_slide(full_view: bool = False):
     )
 
 
-# ───────────────── SIDEBAR ─────────────────
+# ═══════════════════════════════════════════════════════════════════
+#  SIDEBAR
+# ═══════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("### ⚙️ Setup")
 
@@ -608,8 +629,7 @@ with st.sidebar:
                 st.success(f"✅ {len(pages)} slides loaded")
 
     if st.session_state.pages:
-        if st.button("🗑️ Unload Document", use_container_width=True,
-                     help="Clear all slides, embeddings and chat history"):
+        if st.button("🗑️ Unload Document", use_container_width=True):
             build_vector_store.clear()
             st.session_state.pages         = []
             st.session_state.vector_store  = None
@@ -618,11 +638,10 @@ with st.sidebar:
             st.session_state.full_view     = False
             st.session_state.present_mode  = False
             st.session_state.chat_history  = []
-            st.toast("✅ Document unloaded — vectors freed from memory.", icon="🗑️")
+            st.toast("✅ Document unloaded.", icon="🗑️")
             st.rerun()
 
-        if st.button("▶ Present", use_container_width=True,
-                     help="Enter full-screen presentation mode"):
+        if st.button("▶ Present", use_container_width=True):
             st.session_state.present_mode = True
             st.session_state.full_view    = False
             st.rerun()
@@ -666,12 +685,43 @@ with st.sidebar:
 
     st.divider()
 
+    # ── Show TURN status so users know what ICE tier is active ───────
+    has_twilio  = bool(os.getenv("TWILIO_ACCOUNT_SID"))
+    has_metered = bool(os.getenv("METERED_API_KEY"))
+    if has_twilio:
+        st.caption("🟢 TURN: Twilio NTS active")
+    elif has_metered:
+        st.caption("🟢 TURN: Metered.ca active")
+    else:
+        with st.expander("⚠️ STUN only — camera may fail on some networks", expanded=False):
+            st.markdown("""
+<div class="turn-setup-box">
+For reliable camera streaming set <b>one</b> of these in your environment:<br><br>
+<b>Option A — Twilio (recommended, free tier)</b><br>
+&nbsp;&nbsp;TWILIO_ACCOUNT_SID<br>
+&nbsp;&nbsp;TWILIO_AUTH_TOKEN<br>
+→ <a href="https://www.twilio.com/try-twilio" target="_blank">twilio.com/try-twilio</a><br><br>
+<b>Option B — Metered.ca (50 GB free/mo)</b><br>
+&nbsp;&nbsp;METERED_API_KEY<br>
+&nbsp;&nbsp;METERED_APP_NAME (your app slug)<br>
+→ <a href="https://www.metered.ca" target="_blank">metered.ca</a>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── webrtc_streamer — RTC config built once from cache ───────────
     ctx = webrtc_streamer(
         key="gesture",
         video_processor_factory=GestureProcessor,
         async_processing=True,
-        rtc_configuration=RTC_CONFIGURATION,
-        media_stream_constraints={"video": {"width": 320, "height": 240}, "audio": False},
+        rtc_configuration=get_rtc_configuration(),
+        media_stream_constraints={
+            "video": {
+                "width":     {"ideal": 320},
+                "height":    {"ideal": 240},
+                "frameRate": {"ideal": 15, "max": 30},
+            },
+            "audio": False,
+        },
     )
 
     shared = get_shared_state()
@@ -702,8 +752,7 @@ with st.sidebar:
         if st.button("➖", use_container_width=True):
             st.session_state.zoom_level = max(
                 st.session_state.zoom_min,
-                round(st.session_state.zoom_level - st.session_state.zoom_step, 2)
-            )
+                round(st.session_state.zoom_level - st.session_state.zoom_step, 2))
             st.rerun()
     with zc2:
         st.markdown(
@@ -715,8 +764,7 @@ with st.sidebar:
         if st.button("➕", use_container_width=True):
             st.session_state.zoom_level = min(
                 st.session_state.zoom_max,
-                round(st.session_state.zoom_level + st.session_state.zoom_step, 2)
-            )
+                round(st.session_state.zoom_level + st.session_state.zoom_step, 2))
             st.rerun()
     if st.button("↺ Reset Zoom", use_container_width=True):
         st.session_state.zoom_level = 1.0
@@ -764,15 +812,13 @@ else:
                 with chat_container:
                     with st.chat_message("user"):
                         st.markdown(prompt)
-
                 with chat_container:
                     with st.chat_message("assistant"):
                         if is_small_talk(prompt):
                             reply = "Hello! 👋 I'm here to help you with the document. Feel free to ask me anything about it!"
                             st.markdown(reply)
                             st.session_state.chat_history.append(
-                                {"role": "assistant", "content": reply}
-                            )
+                                {"role": "assistant", "content": reply})
                         else:
                             try:
                                 docs    = st.session_state.vector_store.similarity_search(prompt, k=3)
@@ -810,13 +856,11 @@ Answer:"""
                                     })
                                 )
                                 st.session_state.chat_history.append(
-                                    {"role": "assistant", "content": full_response}
-                                )
+                                    {"role": "assistant", "content": full_response})
                             except Exception as e:
                                 err_msg = f"⚠️ Error: {str(e)}"
                                 st.error(err_msg)
                                 st.session_state.chat_history.append(
-                                    {"role": "assistant", "content": err_msg}
-                                )
+                                    {"role": "assistant", "content": err_msg})
         else:
             st.info("⬅️ Process a PDF first to enable the assistant.")
