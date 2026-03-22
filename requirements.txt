@@ -23,5 +23,5 @@ faiss-cpu
 sentence-transformers
 huggingface-hub
 groq
-
+twilio>=9.0.0
 numpy==1.26.4
