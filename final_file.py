@@ -17,19 +17,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from PyPDF2 import PdfReader
 from streamlit_webrtc import VideoProcessorBase, webrtc_streamer, RTCConfiguration
-
-# ── Explicit STUN servers so WebRTC ICE negotiation succeeds even
-#    after Streamlit reruns triggered by PDF loading / fragments.
-#    Without this, the browser falls back to host-only ICE candidates
-#    which fail on most networks / Docker / cloud deployments.
-RTC_CONFIGURATION = RTCConfiguration({
-    "iceServers": [
-        {"urls": ["stun:stun.l.google.com:19302"]},
-        {"urls": ["stun:stun1.l.google.com:19302"]},
-        {"urls": ["stun:stun2.l.google.com:19302"]},
-        {"urls": ["stun:stun3.l.google.com:19302"]},
-    ]
-})
+from twilio.rest import Client
 
 # ───────────────── PAGE CONFIG ─────────────────
 st.set_page_config(page_title="SlidePilot", layout="wide")
@@ -37,7 +25,6 @@ st.set_page_config(page_title="SlidePilot", layout="wide")
 # ───────────────── CUSTOM CSS ─────────────────
 st.markdown("""
 <style>
-    /* ── General badges & pills ─────────────────────────────────── */
     .mode-badge {
         display: inline-block;
         font-size: 0.82rem;
@@ -110,7 +97,6 @@ st.markdown("""
         width: auto !important;
         max-width: 100% !important;
     }
-    /* ── Sticky header ───────────────────────────────────────────── */
     .sticky-header {
         position: sticky;
         top: 0;
@@ -118,143 +104,147 @@ st.markdown("""
         background-color: var(--background-color, #0e1117);
         padding-bottom: 10px;
     }
-
-    /* ══════════════════════════════════════════════════════════════
-       PRESENTATION MODE
-       ══════════════════════════════════════════════════════════════ */
     body.present-active [data-testid="stSidebar"],
     body.present-active [data-testid="stHeader"],
     body.present-active [data-testid="stToolbar"],
     body.present-active [data-testid="stDecoration"],
-    body.present-active footer {
-        display: none !important;
-    }
-    body.present-active [data-testid="stAppViewContainer"] {
-        background: #000 !important;
-    }
+    body.present-active footer { display: none !important; }
+    body.present-active [data-testid="stAppViewContainer"] { background: #000 !important; }
     body.present-active [data-testid="stMainBlockContainer"],
-    body.present-active [data-testid="stMain"] {
-        padding: 0 !important;
-        max-width: 100vw !important;
-    }
-
+    body.present-active [data-testid="stMain"] { padding: 0 !important; max-width: 100vw !important; }
     .present-slide-wrap {
-        width: 100%;
-        height: calc(100vh - 56px);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: #000;
-        overflow: hidden;
+        width: 100%; height: calc(100vh - 56px);
+        display: flex; align-items: center; justify-content: center;
+        background: #000; overflow: hidden;
     }
-    .present-slide-wrap img {
-        max-width: 100%;
-        max-height: 100%;
-        object-fit: contain;
-        display: block;
-    }
-
+    .present-slide-wrap img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
     .present-nav-bar {
-        position: sticky;
-        bottom: 0;
-        z-index: 9999;
-        width: 100%;
-        height: 56px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 16px;
-        background: rgba(0, 0, 0, 0.85);
-        backdrop-filter: blur(10px);
+        position: sticky; bottom: 0; z-index: 9999;
+        width: 100%; height: 56px;
+        display: flex; align-items: center; justify-content: center; gap: 16px;
+        background: rgba(0,0,0,0.85); backdrop-filter: blur(10px);
         border-top: 1px solid rgba(255,255,255,0.08);
-        opacity: 0.22;
-        transition: opacity 0.3s ease;
+        opacity: 0.22; transition: opacity 0.3s ease;
     }
     .present-nav-bar:hover { opacity: 1; }
-
     .present-nav-bar button {
         background: rgba(255,255,255,0.08) !important;
         border: 1px solid rgba(255,255,255,0.35) !important;
-        color: #fff !important;
-        border-radius: 8px !important;
-        font-weight: 700 !important;
-        transition: background 0.2s !important;
+        color: #fff !important; border-radius: 8px !important;
+        font-weight: 700 !important; transition: background 0.2s !important;
     }
-    .present-nav-bar button:hover {
-        background: rgba(255,255,255,0.22) !important;
-    }
-    .present-exit button {
-        border-color: rgba(231,76,60,0.6) !important;
-        color: #ff6b6b !important;
-    }
-    .present-exit button:hover {
-        background: rgba(231,76,60,0.28) !important;
-    }
+    .present-nav-bar button:hover { background: rgba(255,255,255,0.22) !important; }
+    .present-exit button { border-color: rgba(231,76,60,0.6) !important; color: #ff6b6b !important; }
+    .present-exit button:hover { background: rgba(231,76,60,0.28) !important; }
     .present-counter {
-        color: rgba(255,255,255,0.65);
-        font-size: 0.88rem;
+        color: rgba(255,255,255,0.65); font-size: 0.88rem; font-weight: 600;
+        min-width: 90px; text-align: center; letter-spacing: 1px; user-select: none;
+    }
+    .twilio-badge {
+        display: inline-block;
+        background: rgba(245, 47, 47, 0.12);
+        border: 1px solid rgba(245, 47, 47, 0.4);
+        color: #f52f2f;
+        font-size: 0.72rem;
         font-weight: 600;
-        min-width: 90px;
-        text-align: center;
-        letter-spacing: 1px;
-        user-select: none;
+        border-radius: 20px;
+        padding: 2px 10px;
+        letter-spacing: 0.4px;
+    }
+    .stun-badge {
+        display: inline-block;
+        background: rgba(255,165,0,0.12);
+        border: 1px solid rgba(255,165,0,0.45);
+        color: #ffa500;
+        font-size: 0.72rem;
+        font-weight: 600;
+        border-radius: 20px;
+        padding: 2px 10px;
+        letter-spacing: 0.4px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# ───────────────── HEADING (sticky) ─────────────────
+# ───────────────── HEADING ─────────────────
 st.markdown("""
 <div class="sticky-header">
 <div style="
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    padding: 18px 0 10px 0;
-    text-align: center;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 6px; padding: 18px 0 10px 0; text-align: center;
 ">
-    <div style="
-        font-family: 'Georgia', serif;
-        font-size: 3.2rem;
-        font-weight: 800;
-        letter-spacing: -0.5px;
-        line-height: 1;
-    ">
-        <span style="color: #ffffff;">Slide</span><span style="color: #5b7fe8;">Pilot</span>
+    <div style="font-family:'Georgia',serif;font-size:3.2rem;font-weight:800;letter-spacing:-0.5px;line-height:1;">
+        <span style="color:#ffffff;">Slide</span><span style="color:#5b7fe8;">Pilot</span>
     </div>
-    <div style="
-        color: #6b7280;
-        font-size: 0.75rem;
-        font-weight: 600;
-        letter-spacing: 2.5px;
-        text-transform: uppercase;
-    ">
+    <div style="color:#6b7280;font-size:0.75rem;font-weight:600;letter-spacing:2.5px;text-transform:uppercase;">
         Gesture &nbsp;&middot;&nbsp; Zoom &nbsp;&middot;&nbsp; AI Chat
     </div>
 </div>
 </div>
 """, unsafe_allow_html=True)
 
-# ───────────────── ENV API KEY ─────────────────
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# ───────────────── ENV / SECRETS HELPERS ─────────────────
+def _get_secret(key: str) -> str | None:
+    """Read from st.secrets first, then os.environ as fallback."""
+    try:
+        return st.secrets[key]
+    except (KeyError, FileNotFoundError):
+        return os.getenv(key)
+
+GROQ_API_KEY        = _get_secret("GROQ_API_KEY")
+TWILIO_ACCOUNT_SID  = _get_secret("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN   = _get_secret("TWILIO_AUTH_TOKEN")
+
 if not GROQ_API_KEY:
-    st.error("❌ GROQ_API_KEY not found in environment variables.")
+    st.error("❌ GROQ_API_KEY not found in environment variables or secrets.")
     st.stop()
+
+# ───────────────── TWILIO RTC CONFIGURATION ─────────────────
+@st.cache_resource(ttl=60)
+def get_rtc_configuration() -> RTCConfiguration:
+    """
+    Fetch fresh Twilio NTS TURN credentials and return an RTCConfiguration.
+    Cached for 60 s so we never hammer the Twilio API on every rerun, but
+    always have a valid token (Twilio tokens live 86 400 s by default).
+    Falls back to public Google STUN if Twilio credentials are missing.
+    """
+    if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+        try:
+            client      = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+            token       = client.tokens.create()          # default TTL = 86 400 s
+            ice_servers = token.ice_servers               # list of dicts with urls/username/credential
+            return RTCConfiguration({"iceServers": ice_servers})
+        except Exception as e:
+            st.warning(f"⚠️ Twilio token fetch failed ({e}). Falling back to STUN.")
+
+    # Fallback — public STUN only (may fail behind strict NAT / firewalls)
+    return RTCConfiguration({
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {"urls": ["stun:stun1.l.google.com:19302"]},
+        ]
+    })
+
+
+def _rtc_badge() -> str:
+    """Return a small HTML badge indicating which ICE server mode is active."""
+    if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+        return '<span class="twilio-badge">🔴 Twilio TURN</span>'
+    return '<span class="stun-badge">🟡 STUN only</span>'
+
 
 # ───────────────── SESSION STATE ─────────────────
 _DEFAULTS = {
-    "pages": [],
+    "pages":        [],
     "current_page": 0,
     "vector_store": None,
-    "chain_cache": {},
+    "chain_cache":  {},
     "chat_history": [],
-    "zoom_level": 1.0,
-    "zoom_step": 0.25,
-    "zoom_min": 0.5,
-    "zoom_max": 3.0,
+    "zoom_level":   1.0,
+    "zoom_step":    0.25,
+    "zoom_min":     0.5,
+    "zoom_max":     3.0,
     "gesture_mode": "NAV",
-    "full_view": False,
+    "full_view":    False,
     "present_mode": False,
 }
 for k, v in _DEFAULTS.items():
@@ -263,12 +253,10 @@ for k, v in _DEFAULTS.items():
 
 @st.cache_resource
 def get_gesture_queue():
-    """Single-slot queue: only the freshest gesture reaches the UI."""
     return queue.Queue(maxsize=1)
 
 @st.cache_resource
 def get_shared_state():
-    """Thread-safe dict written by the CV thread, read by Streamlit."""
     return {
         "finger_count":  None,
         "gesture_mode":  "NAV",
@@ -280,7 +268,6 @@ _shared_boot = get_shared_state()
 if _shared_boot["gesture_mode"] != st.session_state.gesture_mode:
     st.session_state.gesture_mode = _shared_boot["gesture_mode"]
     st.rerun()
-
 
 # ───────────────── SMALL-TALK DETECTOR ─────────────────
 SMALL_TALK = {
@@ -294,7 +281,7 @@ def is_small_talk(text: str) -> bool:
 # ───────────────── PDF HELPERS ─────────────────
 @st.cache_data
 def convert_pdf_to_images(pdf_bytes):
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc   = fitz.open(stream=pdf_bytes, filetype="pdf")
     pages = [p.get_pixmap(dpi=150).tobytes("png") for p in doc]
     doc.close()
     return pages
@@ -312,19 +299,20 @@ def extract_text(pdf_files):
 
 @st.cache_resource
 def build_vector_store(text):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = splitter.split_text(text)
+    splitter   = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks     = splitter.split_text(text)
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     return FAISS.from_texts(chunks, embeddings)
 
 # ═══════════════════════════════════════════════════════════════════
-#  GESTURE PROCESSOR
+#  GESTURE PROCESSOR  — with frame-skip to cut CPU & latency
 # ═══════════════════════════════════════════════════════════════════
 
-_BUFFER_SIZE       = 6
-_FIST_HOLD_SECONDS = 2.0
-_DEAD_ZONE         = {2, 3}
-_NO_HAND_SENTINEL  = -1
+_BUFFER_SIZE            = 6
+_FIST_HOLD_SECONDS      = 2.0
+_DEAD_ZONE              = {2, 3}
+_NO_HAND_SENTINEL       = -1
+_PROCESS_EVERY_N_FRAMES = 3
 
 
 class GestureProcessor(VideoProcessorBase):
@@ -337,6 +325,10 @@ class GestureProcessor(VideoProcessorBase):
         )
         self._fsm: dict[str, str] = {"NAV": "NEUTRAL", "ZOOM": "NEUTRAL"}
         self.fist_start  = None
+        self._frame_idx  = 0
+        self._last_total = _NO_HAND_SENTINEL
+        self._shared     = get_shared_state()
+        self._queue      = get_gesture_queue()
 
     @staticmethod
     def _put(img, text, pos, scale=0.60, color=(200, 200, 200), thickness=2):
@@ -356,8 +348,8 @@ class GestureProcessor(VideoProcessorBase):
             return self.frame_buffer[-1]
 
     def _fsm_step(self, mode: str, stable: int) -> str | None:
-        state = self._fsm[mode]
-        is_dead  = stable in _DEAD_ZONE or stable == _NO_HAND_SENTINEL
+        state   = self._fsm[mode]
+        is_dead = stable in _DEAD_ZONE or stable == _NO_HAND_SENTINEL
 
         if state == "WAIT_FOR_RESET":
             if is_dead:
@@ -367,7 +359,6 @@ class GestureProcessor(VideoProcessorBase):
         if state == "NEUTRAL":
             if is_dead:
                 return None
-
             if mode == "NAV":
                 if stable <= 1:
                     action = "LEFT"
@@ -382,77 +373,72 @@ class GestureProcessor(VideoProcessorBase):
                     action = "ZOOM_OUT"
                 else:
                     return None
-
             self._fsm[mode] = "WAIT_FOR_RESET"
             return action
-
         return None
 
     def recv(self, frame):
         img   = frame.to_ndarray(format="bgr24")
-        small = cv2.flip(cv2.resize(img, (320, 240)), 1)
+        small = cv2.resize(img, (320, 240))
+        small = cv2.flip(small, 1)
 
-        hands, small = self.detector.findHands(small, draw=True)
-        shared       = get_shared_state()
-
+        self._frame_idx += 1
+        shared    = self._shared
         self.mode = shared["gesture_mode"]
         is_zoom   = self.mode == "ZOOM"
         mode_color = (50, 200, 100) if is_zoom else (102, 126, 234)
-        now        = time.time()
+        now = time.time()
 
-        if hands:
-            fingers = self.detector.fingersUp(hands[0])
-            total   = sum(fingers)
-            self.frame_buffer.append(total)
-            shared["finger_count"] = total
-        else:
-            self.frame_buffer.append(_NO_HAND_SENTINEL)
-            shared["finger_count"]  = None
-            shared["fist_hold_pct"] = 0.0
-            self.fist_start         = None
+        if self._frame_idx % _PROCESS_EVERY_N_FRAMES == 0:
+            hands, small = self.detector.findHands(small, draw=True)
+            if hands:
+                fingers          = self.detector.fingersUp(hands[0])
+                total            = sum(fingers)
+                self._last_total = total
+                shared["finger_count"] = total
+            else:
+                self._last_total        = _NO_HAND_SENTINEL
+                shared["finger_count"]  = None
+                shared["fist_hold_pct"] = 0.0
+                self.fist_start         = None
 
+        total  = self._last_total
         stable = self._stable_gesture()
+        self.frame_buffer.append(total)
 
         if stable == 0:
             if self.fist_start is None:
                 self.fist_start = now
-
             pct = min((now - self.fist_start) / _FIST_HOLD_SECONDS, 1.0)
             shared["fist_hold_pct"] = pct
             self._put(small, f"Fist  {int(pct*100)}%  hold to switch mode",
                       (10, 30), color=(255, 200, 50))
             self._hbar(small, pct, color=(255, 200, 50))
-
             if pct >= 1.0:
-                new_mode = "ZOOM" if self.mode == "NAV" else "NAV"
+                new_mode               = "ZOOM" if self.mode == "NAV" else "NAV"
                 self.mode              = new_mode
                 shared["gesture_mode"] = new_mode
-                self._fsm = {"NAV": "NEUTRAL", "ZOOM": "NEUTRAL"}
-                self.frame_buffer = deque(
+                self._fsm              = {"NAV": "NEUTRAL", "ZOOM": "NEUTRAL"}
+                self.frame_buffer      = deque(
                     [_NO_HAND_SENTINEL] * _BUFFER_SIZE, maxlen=_BUFFER_SIZE
                 )
                 try:
-                    get_gesture_queue().put_nowait(f"MODE_{new_mode}")
+                    self._queue.put_nowait(f"MODE_{new_mode}")
                 except queue.Full:
                     pass
                 self.fist_start = None
-
         else:
             if stable != _NO_HAND_SENTINEL:
-                self.fist_start = None
+                self.fist_start         = None
                 shared["fist_hold_pct"] = 0.0
-
             action = self._fsm_step(self.mode, stable)
-
             if action:
                 try:
-                    get_gesture_queue().put_nowait(action)
+                    self._queue.put_nowait(action)
                 except queue.Full:
                     pass
-
-            fsm_state = self._fsm[self.mode]
+            fsm_state           = self._fsm[self.mode]
             shared["fsm_state"] = fsm_state
-
             label_map = {
                 "LEFT":     "← PREV",
                 "RIGHT":    "NEXT →",
@@ -464,7 +450,7 @@ class GestureProcessor(VideoProcessorBase):
             elif stable in _DEAD_ZONE:
                 self._put(small, f"{stable} fingers  (dead zone)", (10, 30), color=(160, 160, 160))
             elif fsm_state == "WAIT_FOR_RESET":
-                self._put(small, f"Return to dead zone to re-arm",
+                self._put(small, "Return to dead zone to re-arm",
                           (10, 30), color=(255, 200, 50))
             else:
                 lbl = label_map.get(action or "", "")
@@ -487,15 +473,13 @@ def _inject_present_body_class(active: bool):
     action = "add" if active else "remove"
     st.markdown(
         f"""<script>
-            (function() {{
-                document.body.classList.{action}('present-active');
-            }})();
+            (function() {{ document.body.classList.{action}('present-active'); }})();
         </script>""",
         unsafe_allow_html=True,
     )
 
 
-@st.fragment(run_every="0.4s")
+@st.fragment(run_every="0.5s")
 def render_present_mode():
     try:
         action = get_gesture_queue().get_nowait()
@@ -503,7 +487,6 @@ def render_present_mode():
         action = None
 
     shared = get_shared_state()
-
     if action:
         if action == "MODE_ZOOM":
             st.session_state.gesture_mode = "ZOOM"
@@ -519,7 +502,6 @@ def render_present_mode():
                 st.session_state.current_page = min(n - 1, st.session_state.current_page + 1)
 
     _inject_present_body_class(True)
-
     if not st.session_state.pages:
         st.warning("No slides loaded.")
         return
@@ -534,29 +516,21 @@ def render_present_mode():
         f'</div>',
         unsafe_allow_html=True,
     )
-
     st.markdown('<div class="present-nav-bar">', unsafe_allow_html=True)
-
     c_prev, c_counter, c_next, c_exit = st.columns([1, 2, 1, 1])
-
     with c_prev:
         if st.button("⬅️ Prev", key="pm_prev", use_container_width=True):
             st.session_state.current_page = max(0, idx - 1)
             st.rerun()
-
     with c_counter:
         st.markdown(
-            f'<div class="present-counter">'
-            f'Slide &nbsp; {idx + 1} &nbsp;/&nbsp; {total}'
-            f'</div>',
+            f'<div class="present-counter">Slide &nbsp; {idx+1} &nbsp;/&nbsp; {total}</div>',
             unsafe_allow_html=True,
         )
-
     with c_next:
         if st.button("Next ➡️", key="pm_next", use_container_width=True):
             st.session_state.current_page = min(total - 1, idx + 1)
             st.rerun()
-
     with c_exit:
         st.markdown('<div class="present-exit">', unsafe_allow_html=True)
         if st.button("✕ Exit", key="pm_exit", use_container_width=True,
@@ -565,11 +539,10 @@ def render_present_mode():
             _inject_present_body_class(False)
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
-
     st.markdown('</div>', unsafe_allow_html=True)
 
 
-@st.fragment(run_every="0.4s")
+@st.fragment(run_every="0.15s")
 def slide_fragment(full_view: bool = False):
     try:
         action = get_gesture_queue().get_nowait()
@@ -577,7 +550,6 @@ def slide_fragment(full_view: bool = False):
         action = None
 
     shared = get_shared_state()
-
     if action:
         if action in ("MODE_ZOOM", "MODE_NAV"):
             new_mode = "ZOOM" if action == "MODE_ZOOM" else "NAV"
@@ -589,8 +561,7 @@ def slide_fragment(full_view: bool = False):
             if action == "LEFT":
                 st.session_state.current_page = max(0, st.session_state.current_page - 1)
             elif action == "RIGHT":
-                st.session_state.current_page = min(total_pages - 1,
-                                                    st.session_state.current_page + 1)
+                st.session_state.current_page = min(total_pages - 1, st.session_state.current_page + 1)
             elif action == "ZOOM_IN":
                 st.session_state.zoom_level = min(
                     st.session_state.zoom_max,
@@ -615,14 +586,11 @@ def _render_slide(full_view: bool = False):
     zoom  = st.session_state.zoom_level
 
     ctrl_prev, ctrl_info, ctrl_next, ctrl_fv = st.columns([1, 5, 1, 1])
-
     with ctrl_prev:
         if st.button("⬅️", use_container_width=True,
-                     key=f"prev_{'fv' if full_view else 'nv'}",
-                     help="Previous slide"):
+                     key=f"prev_{'fv' if full_view else 'nv'}", help="Previous slide"):
             st.session_state.current_page = max(0, idx - 1)
             st.rerun()
-
     with ctrl_info:
         fv_badge = '<span class="fullview-pill">⛶ full</span>' if full_view else ""
         st.markdown(
@@ -633,14 +601,11 @@ def _render_slide(full_view: bool = False):
             f'</div>',
             unsafe_allow_html=True,
         )
-
     with ctrl_next:
         if st.button("➡️", use_container_width=True,
-                     key=f"next_{'fv' if full_view else 'nv'}",
-                     help="Next slide"):
+                     key=f"next_{'fv' if full_view else 'nv'}", help="Next slide"):
             st.session_state.current_page = min(total - 1, idx + 1)
             st.rerun()
-
     with ctrl_fv:
         btn_label = "✕" if full_view else "⛶"
         btn_help  = "Exit full view" if full_view else "Expand to full width"
@@ -651,35 +616,69 @@ def _render_slide(full_view: bool = False):
 
     container_h = "82vh" if full_view else "600px"
     img_b64     = base64.b64encode(st.session_state.pages[idx]).decode()
-
     st.markdown(
         f'''<div style="
-                overflow: auto;
-                height: {container_h};
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                border-radius: 8px;
-                background: rgba(0,0,0,0.04);">
+                overflow:auto; height:{container_h};
+                display:flex; justify-content:center; align-items:center;
+                border-radius:8px; background:rgba(0,0,0,0.04);">
               <img src="data:image/png;base64,{img_b64}"
-                   style="transform: scale({zoom});
-                          transform-origin: center center;
-                          transition: transform 0.35s cubic-bezier(0.25,0.46,0.45,0.94);
-                          max-width: 100%;
-                          height: auto;" />
+                   style="transform:scale({zoom});
+                          transform-origin:center center;
+                          transition:transform 0.35s cubic-bezier(0.25,0.46,0.45,0.94);
+                          max-width:100%; height:auto;" />
             </div>''',
         unsafe_allow_html=True,
     )
 
 
 # ───────────────── SIDEBAR ─────────────────
+
+@st.fragment
+def camera_fragment():
+    ctx = webrtc_streamer(
+        key="gesture",
+        video_processor_factory=GestureProcessor,
+        async_processing=False,
+        rtc_configuration=get_rtc_configuration(),   # ← Twilio NTS (or STUN fallback)
+        media_stream_constraints={
+            "video": {
+                "width":     {"ideal": 320},
+                "height":    {"ideal": 240},
+                "frameRate": {"ideal": 10, "max": 10},
+            },
+            "audio": False,
+        },
+    )
+
+    shared = get_shared_state()
+    if ctx and ctx.state.playing:
+        count   = shared.get("finger_count")
+        is_zoom = st.session_state.gesture_mode == "ZOOM"
+        if count is not None:
+            badge_bg = "#32c864" if is_zoom else "#667eea"
+            st.markdown(
+                f'<div style="display:flex;justify-content:center;">'
+                f'  <div class="finger-badge" style="background:{badge_bg};">{count}</div>'
+                f'</div>'
+                f'<div class="finger-label">finger{"s" if count != 1 else ""} detected</div>',
+                unsafe_allow_html=True,
+            )
+            pct = shared.get("fist_hold_pct", 0.0)
+            if pct > 0:
+                st.progress(pct, text="Hold fist to toggle mode…")
+        else:
+            st.markdown(
+                '<div class="finger-label" style="text-align:center;margin-top:8px;">'
+                '🖐️ Show your hand...</div>',
+                unsafe_allow_html=True,
+            )
+
+
 with st.sidebar:
     st.markdown("### ⚙️ Setup")
-
     uploaded_pdfs = st.file_uploader(
         "Upload PDF files", accept_multiple_files=True, type=["pdf"]
     )
-
     if st.button("🚀 Process PDFs", use_container_width=True):
         if uploaded_pdfs:
             with st.spinner("Processing PDFs..."):
@@ -710,15 +709,13 @@ with st.sidebar:
             st.rerun()
 
         if st.button("▶ Present", use_container_width=True,
-                     help="Enter full-screen presentation mode — sidebar and chrome hidden"):
+                     help="Enter full-screen presentation mode"):
             st.session_state.present_mode = True
             st.session_state.full_view    = False
             st.rerun()
 
     st.divider()
-
     st.markdown("### 🎥 Gesture Control")
-
     is_zoom   = st.session_state.gesture_mode == "ZOOM"
     mode_cls  = "mode-zoom" if is_zoom else "mode-nav"
     mode_icon = "🔍 ZOOM MODE" if is_zoom else "🧭 NAV MODE"
@@ -755,36 +752,16 @@ with st.sidebar:
 
     st.divider()
 
-    # ── FIX: Pass RTC_CONFIGURATION so ICE negotiation works after reruns ──
-    ctx = webrtc_streamer(
-        key="gesture",
-        video_processor_factory=GestureProcessor,
-        async_processing=True,
-        rtc_configuration=RTC_CONFIGURATION,
-        media_stream_constraints={"video": {"width": 320, "height": 240}, "audio": False},
+    # ── ICE / TURN status badge ──
+    st.markdown(
+        f'<div style="margin-bottom:6px;">'
+        f'  <span style="font-size:0.75rem;color:#888;">WebRTC: </span>'
+        f'  {_rtc_badge()}'
+        f'</div>',
+        unsafe_allow_html=True,
     )
 
-    shared = get_shared_state()
-    if ctx and ctx.state.playing:
-        count = shared.get("finger_count")
-        if count is not None:
-            badge_bg = "#32c864" if is_zoom else "#667eea"
-            st.markdown(
-                f'<div style="display:flex;justify-content:center;">'
-                f'  <div class="finger-badge" style="background:{badge_bg};">{count}</div>'
-                f'</div>'
-                f'<div class="finger-label">finger{"s" if count != 1 else ""} detected</div>',
-                unsafe_allow_html=True,
-            )
-            pct = shared.get("fist_hold_pct", 0.0)
-            if pct > 0:
-                st.progress(pct, text="Hold fist to toggle mode…")
-        else:
-            st.markdown(
-                '<div class="finger-label" style="text-align:center;margin-top:8px;">'
-                '🖐️ Show your hand...</div>',
-                unsafe_allow_html=True,
-            )
+    camera_fragment()
 
     st.divider()
     st.markdown("### 🔍 Zoom (manual)")
@@ -820,16 +797,12 @@ full_view    = st.session_state.full_view
 
 if present_mode:
     render_present_mode()
-
 elif full_view:
     slide_fragment(full_view=True)
-
 else:
     left_col, right_col = st.columns([7, 3])
-
     with left_col:
         slide_fragment(full_view=False)
-
     with right_col:
         hcol1, hcol2 = st.columns([3, 1])
         with hcol1:
@@ -841,7 +814,6 @@ else:
 
         if st.session_state.vector_store:
             chat_container = st.container(height=390)
-
             with chat_container:
                 if not st.session_state.chat_history:
                     st.caption("💬 No messages yet. Ask something about your document!")
@@ -851,13 +823,11 @@ else:
                             st.markdown(msg["content"])
 
             prompt = st.chat_input("Ask about the document...", key="chat_input")
-
             if prompt:
                 st.session_state.chat_history.append({"role": "user", "content": prompt})
                 with chat_container:
                     with st.chat_message("user"):
                         st.markdown(prompt)
-
                 with chat_container:
                     with st.chat_message("assistant"):
                         if is_small_talk(prompt):
@@ -875,7 +845,6 @@ else:
                                     f"{m['role'].capitalize()}: {m['content']}"
                                     for m in history_msgs
                                 )
-
                                 template = """You are a helpful assistant for a PDF document.
 Use the context below to answer the user's question accurately.
 If the question is unrelated to the document, politely say so.
@@ -895,8 +864,7 @@ Answer:"""
                                     model_name="llama-3.1-8b-instant",
                                     temperature=0.5,
                                 )
-                                chain = prompt_template | llm
-
+                                chain         = prompt_template | llm
                                 full_response = st.write_stream(
                                     chunk.content for chunk in chain.stream({
                                         "context":  context,
@@ -907,7 +875,6 @@ Answer:"""
                                 st.session_state.chat_history.append(
                                     {"role": "assistant", "content": full_response}
                                 )
-
                             except Exception as e:
                                 err_msg = f"⚠️ Error: {str(e)}"
                                 st.error(err_msg)
